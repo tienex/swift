@@ -1,7 +1,7 @@
 // RUN: %target-parse-verify-swift
 
 protocol P {
-  typealias SomeType
+  associatedtype SomeType
 }
 
 protocol P2 { 
@@ -47,8 +47,7 @@ f0(i, i,
 
 
 // Position mismatch
-f5(f4)  // expected-error {{cannot invoke 'f5' with an argument list of type '((Int) -> Int)'}}
-// expected-note @-1 {{expected an argument list of type '(T)'}}
+f5(f4)  // expected-error {{argument type '(Int) -> Int' does not conform to expected type 'P2'}}
 
 // Tuple element not convertible.
 f0(i,
@@ -69,14 +68,27 @@ f4(i, d) // expected-error {{extra argument in call}}
 // Missing member.
 i.wobble() // expected-error{{value of type 'Int' has no member 'wobble'}}
 
+// Generic member does not conform.
+extension Int {
+  func wibble<T: P2>(x: T, _ y: T) -> T { return x }
+}
+i.wibble(3, 4) // expected-error {{argument type 'Int' does not conform to expected type 'P2'}}
+
+// Generic member args correct, but return type doesn't match.
+struct A : P2 {
+  func wonka() {}
+}
+let a = A()
+for j in i.wibble(a, a) { // expected-error {{type 'A' does not conform to protocol 'SequenceType'}}
+}
+
 // <rdar://problem/19658691> QoI: Incorrect diagnostic for calling nonexistent members on literals
 1.doesntExist(0)  // expected-error {{value of type 'Int' has no member 'doesntExist'}}
 [1, 2, 3].doesntExist(0)  // expected-error {{value of type '[Int]' has no member 'doesntExist'}}
 "awfawf".doesntExist(0)   // expected-error {{value of type 'String' has no member 'doesntExist'}}
 
 // Does not conform to protocol.
-f5(i)  // expected-error {{cannot invoke 'f5' with an argument list of type '(Int)'}}
-// expected-note @-1 {{expected an argument list of type '(T)'}}
+f5(i)  // expected-error {{argument type 'Int' does not conform to expected type 'P2'}}
 
 // Make sure we don't leave open existentials when diagnosing.
 // <rdar://problem/20598568>
@@ -114,8 +126,7 @@ i ***~ i // expected-error{{cannot convert value of type 'Int' to expected argum
 // FIXME: poor diagnostic, to be fixed in 20142462. For now, we just want to
 // make sure that it doesn't crash.
 func rdar20142523() {
-  map(0..<10, { x in // expected-error{{cannot invoke 'map' with an argument list of type '(Range<Int>, (_) -> _)'}}
-    // expected-note @-1 {{overloads for 'map' exist with these partially matching parameter lists: (C, (C.Generator.Element) -> T), (T?, @noescape (T) -> U)}}
+  map(0..<10, { x in // expected-error{{ambiguous reference to member '..<'}}
     ()
     return x
   })
@@ -242,7 +253,7 @@ func r18800223(i : Int) {
 
   
   var buttonTextColor: String?
-  _ = (buttonTextColor != nil) ? 42 : {$0}; // expected-error {{unable to infer closure return type in current context}}
+  _ = (buttonTextColor != nil) ? 42 : {$0}; // expected-error {{result values in '? :' expression have mismatching types 'Int' and '(_) -> _'}}
 }
 
 // <rdar://problem/21883806> Bogus "'_' can only appear in a pattern or on the left side of an assignment" is back
@@ -261,9 +272,9 @@ func rdar21784170() {
 }
 
 // <rdar://problem/21829141> BOGUS: unexpected trailing closure
-func expect<T, U>(_: T)(_: U.Type) {} // expected-note {{found this candidate}} expected-warning{{curried function declaration syntax will be removed in a future version of Swift}}
-func expect<T, U>(_: T, _: Int = 1)(_: U.Type) {} // expected-note {{found this candidate}} expected-warning{{curried function declaration syntax will be removed in a future version of Swift}}
-expect(Optional(3))(Optional<Int>.self)  // expected-error {{ambiguous use of 'expect'}}
+func expect<T, U>(_: T) -> (U.Type) -> () { return { ty in () } } // expected-note{{found this candidate}}
+func expect<T, U>(_: T, _: Int = 1) -> (U.Type) -> () { return { ty in () } } // expected-note{{found this candidate}}
+expect(Optional(3))(Optional<Int>.self) // expected-error{{ambiguous use of 'expect'}}
 
 // <rdar://problem/19804707> Swift Enum Scoping Oddity
 func rdar19804707() {
@@ -278,8 +289,8 @@ func rdar19804707() {
   knownOps = .BinaryOperator({$1 - $0})
 
   // FIXME: rdar://19804707 - These two statements should be accepted by the type checker.
-  knownOps = .BinaryOperator(){$1 - $0} // expected-error {{type of expression is ambiguous without more context}}
-  knownOps = .BinaryOperator{$1 - $0}   // expected-error {{type of expression is ambiguous without more context}}
+  knownOps = .BinaryOperator(){$1 - $0} // expected-error {{reference to member 'BinaryOperator' cannot be resolved without a contextual type}}
+  knownOps = .BinaryOperator{$1 - $0}   // expected-error {{reference to member 'BinaryOperator' cannot be resolved without a contextual type}}
 }
 
 
@@ -301,8 +312,8 @@ func r20789423() {
 
 
 
-func f7(a: Int)(b : Int) -> Int { // expected-warning{{curried function declaration syntax will be removed in a future version of Swift}}
-  return a+b
+func f7(a: Int) -> (b: Int) -> Int {
+  return { b in a+b }
 }
 
 f7(1)(b: 1)
@@ -320,7 +331,7 @@ f8(b: 1.0)         // expected-error {{cannot convert value of type 'Double' to 
 
 class CurriedClass {
   func method1() {}
-  func method2(a: Int)(b : Int) {} // expected-warning{{curried function declaration syntax will be removed in a future version of Swift}}
+  func method2(a: Int) -> (b : Int) -> () { return { b in () } }
   func method3(a: Int, b : Int) {}
 }
 
@@ -424,8 +435,7 @@ func f20371273() {
 // <rdar://problem/20921068> Swift fails to compile: [0].map() { _ in let r = (1,2).0; return r }
 // FIXME: Should complain about not having a return type annotation in the closure.
 [0].map { _ in let r =  (1,2).0;  return r }
-// expected-error @-1 {{cannot invoke 'map' with an argument list of type '(@noescape (Int) throws -> _)'}}
-// expected-note @-2 {{expected an argument list of type '(@noescape Int throws -> T)'}}
+// expected-error @-1 {{expression type '[_]' is ambiguous without more context}}
 
 // <rdar://problem/21078316> Less than useful error message when using map on optional dictionary type
 func rdar21078316() {
@@ -600,7 +610,7 @@ func r22470302(c: r22470302Class) {
 // <rdar://problem/21928143> QoI: Pointfree reference to generic initializer in generic context does not compile
 extension String {
   @available(*, unavailable, message="calling this is unwise")
-  func unavail<T : SequenceType where T.Generator.Element == String> // expected-note {{'unavail' has been explicitly marked unavailable here}}
+  func unavail<T : SequenceType where T.Generator.Element == String> // expected-note 2 {{'unavail' has been explicitly marked unavailable here}}
     (a : T) -> String {}
 }
 extension Array {
@@ -609,18 +619,19 @@ extension Array {
   }
   
   func h() -> String {
-    return "foo".unavail([0])  // expected-error {{value of type 'String' has no member 'Element'}}
+    return "foo".unavail([0])  // expected-error {{'unavail' is unavailable: calling this is unwise}}
   }
 }
 
 // <rdar://problem/22519983> QoI: Weird error when failing to infer archetype
-func safeAssign<T: RawRepresentable>(inout lhs: T) -> Bool {}  // expected-note {{in call to function 'safeAssign'}}
+func safeAssign<T: RawRepresentable>(inout lhs: T) -> Bool {}
+// expected-note @-1 {{in call to function 'safeAssign'}}
 let a = safeAssign // expected-error {{generic parameter 'T' could not be inferred}}
 
 
 // <rdar://problem/21692808> QoI: Incorrect 'add ()' fixit with trailing closure
 func foo() -> [Int] {
-  return Array <Int> (count: 1) { // expected-error {{cannot invoke initializer for type 'Array<Int>' with an argument list of type '(count: Int, () -> Int)'}}
+  return Array <Int> (count: 1) { // expected-error {{cannot invoke initializer for type 'Array<Int>' with an argument list of type '(count: Int, () -> _)'}}
     // expected-note @-1 {{expected an argument list of type '(count: Int, repeatedValue: Element)'}}
     return 1
   }
@@ -652,7 +663,7 @@ example21890157.property = "confusing"  // expected-error {{value of optional ty
 struct UnaryOp {}
 
 _ = -UnaryOp() // expected-error {{unary operator '-' cannot be applied to an operand of type 'UnaryOp'}}
-// expected-note @-1 {{overloads for '-' exist with these partially matching parameter lists: (Float), (Double),}}
+// expected-note @-1 {{overloads for '-' exist with these partially matching parameter lists: (Float), (Double)}}
 
 
 // <rdar://problem/23433271> Swift compiler segfault in failure diagnosis
@@ -673,6 +684,26 @@ func r22058555() {
 func r23272739(contentType: String) {
   let actualAcceptableContentTypes: Set<String> = []
   return actualAcceptableContentTypes.contains(contentType)  // expected-error {{unexpected non-void return value in void function}}
+}
+
+// <rdar://problem/23641896> QoI: Strings in Swift cannot be indexed directly with integer offsets
+func r23641896() {
+  var g = "Hello World"
+  g.replaceRange(0...2, with: "ce")  // expected-error {{String may not be indexed with 'Int', it has variable size elements}}
+  // expected-note @-1 {{consider using an existing high level algorithm, str.startIndex.advancedBy(n), or a projection like str.utf8}}
+
+  _ = g[12]  // expected-error {{'subscript' is unavailable: cannot subscript String with an Int, see the documentation comment for discussion}}
+
+}
+
+
+// <rdar://problem/23718859> QoI: Incorrectly flattening ((Int,Int)) argument list to (Int,Int) when printing note
+func test17875634() {
+  var match: [(Int, Int)] = []
+  var row = 1
+  var col = 2
+  
+  match.append(row, col)  // expected-error {{extra argument in call}}
 }
 
 

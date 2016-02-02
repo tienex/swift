@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -105,8 +105,7 @@ Expr *TypeChecker::substituteInputSugarTypeForResult(ApplyExpr *E) {
   // sugar on it.  If so, propagate the sugar to the curried result function
   // type.
   if (isa<ConstructorRefCallExpr>(E) && isa<TypeExpr>(E->getArg())) {
-    auto resultSugar =
-      E->getArg()->getType()->castTo<MetatypeType>()->getInstanceType();
+    auto resultSugar = cast<TypeExpr>(E->getArg())->getInstanceType();
 
     // The result of this apply is "(args) -> T" where T is the type being
     // constructed.  Apply the sugar onto it.
@@ -142,7 +141,9 @@ static InfixData getInfixData(TypeChecker &TC, DeclContext *DC, Expr *E) {
                      Associativity::Right,
                      /*assignment*/ false);
 
-  } else if (auto *assign = dyn_cast<AssignExpr>(E)) {
+  }
+
+  if (auto *assign = dyn_cast<AssignExpr>(E)) {
     // Assignment has fixed precedence.
     assert(!assign->isFolded() && "already folded assign expr in sequence?!");
     (void)assign;
@@ -150,7 +151,9 @@ static InfixData getInfixData(TypeChecker &TC, DeclContext *DC, Expr *E) {
                      Associativity::Right,
                      /*assignment*/ true);
 
-  } else if (auto *as = dyn_cast<ExplicitCastExpr>(E)) {
+  }
+
+  if (auto *as = dyn_cast<ExplicitCastExpr>(E)) {
     // 'as' and 'is' casts have fixed precedence.
     assert(!as->isFolded() && "already folded 'as' expr in sequence?!");
     (void)as;
@@ -158,7 +161,9 @@ static InfixData getInfixData(TypeChecker &TC, DeclContext *DC, Expr *E) {
                      Associativity::None,
                      /*assignment*/ false);
 
-  } else if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
+  }
+
+  if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
     SourceFile *SF = DC->getParentSourceFile();
     Identifier name = DRE->getDecl()->getName();
     bool isCascading = DC->isCascadingContextForLookup(true);
@@ -166,7 +171,9 @@ static InfixData getInfixData(TypeChecker &TC, DeclContext *DC, Expr *E) {
                                                         E->getLoc()))
       return op->getInfixData();
 
-  } else if (OverloadedDeclRefExpr *OO = dyn_cast<OverloadedDeclRefExpr>(E)) {
+  }
+
+  if (OverloadedDeclRefExpr *OO = dyn_cast<OverloadedDeclRefExpr>(E)) {
     SourceFile *SF = DC->getParentSourceFile();
     Identifier name = OO->getDecls()[0]->getName();
     bool isCascading = DC->isCascadingContextForLookup(true);
@@ -174,8 +181,12 @@ static InfixData getInfixData(TypeChecker &TC, DeclContext *DC, Expr *E) {
                                                         E->getLoc()))
       return op->getInfixData();
   }
-  
-  TC.diagnose(E->getLoc(), diag::unknown_binop);
+
+  // If E is already an ErrorExpr, then we've diagnosed it as invalid already,
+  // otherwise emit an error.
+  if (!isa<ErrorExpr>(E))
+    TC.diagnose(E->getLoc(), diag::unknown_binop);
+
   // Recover with an infinite-precedence left-associative operator.
   return InfixData((unsigned char)~0U, Associativity::Left,
                    /*assignment*/ false);
@@ -302,7 +313,7 @@ static Expr *makeBinOp(TypeChecker &TC, Expr *Op, Expr *LHS, Expr *RHS,
                                      SourceLoc(), 
                                      ArgElts2, { }, { }, SourceLoc(),
                                      /*hasTrailingClosure=*/false,
-                                     LHS->isImplicit() && RHS->isImplicit());
+                                     /*Implicit=*/true);
 
   
   
@@ -550,14 +561,14 @@ Type TypeChecker::getUnopenedTypeOfReference(ValueDecl *value, Type baseType,
 }
 
 Expr *TypeChecker::buildCheckedRefExpr(ValueDecl *value, DeclContext *UseDC,
-                                       SourceLoc loc, bool Implicit) {
+                                       DeclNameLoc loc, bool Implicit) {
   auto type = getUnopenedTypeOfReference(value, Type(), UseDC);
   AccessSemantics semantics = value->getAccessSemanticsFromContext(UseDC);
   return new (Context) DeclRefExpr(value, loc, Implicit, semantics, type);
 }
 
 Expr *TypeChecker::buildRefExpr(ArrayRef<ValueDecl *> Decls,
-                                DeclContext *UseDC, SourceLoc NameLoc,
+                                DeclContext *UseDC, DeclNameLoc NameLoc,
                                 bool Implicit, bool isSpecialized) {
   assert(!Decls.empty() && "Must have at least one declaration");
 
@@ -837,7 +848,7 @@ namespace {
               TC.diagnose(NTD->getLoc(), diag::type_declared_here);
 
               TC.diagnose(D->getLoc(), diag::decl_declared_here,
-                          D->getName());
+                          D->getFullName());
 
               return { false, DRE };
             }
@@ -917,7 +928,7 @@ namespace {
             }
           }
           TC.diagnose(capturedDecl->getLoc(), diag::decl_declared_here,
-                      capturedDecl->getName());
+                      capturedDecl->getFullName());
         }
         return false;
       };
@@ -974,8 +985,14 @@ namespace {
     bool walkToDeclPre(Decl *D) override {
       if (auto *AFD = dyn_cast<AbstractFunctionDecl>(D)) {
         propagateCaptures(AFD, AFD->getLoc());
-        for (auto *paramPattern : AFD->getBodyParamPatterns())
-          paramPattern->walk(*this);
+        
+        // Can default parameter initializers capture state?  That seems like
+        // a really bad idea.
+        for (auto *paramList : AFD->getParameterLists())
+          for (auto param : *paramList) {
+            if (auto E = param->getDefaultValue())
+              E->getExpr()->walk(*this);
+          }
         return false;
       }
 

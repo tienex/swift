@@ -14,6 +14,9 @@
 // RUN: %swiftc_driver -driver-print-jobs -target x86_64-unknown-linux-gnu -Ffoo -framework bar -Lbaz -lboo -Xlinker -undefined %s 2>&1 > %t.linux.txt
 // RUN: FileCheck -check-prefix LINUX-x86_64 %s < %t.linux.txt
 
+// RUN: %swiftc_driver -driver-print-jobs -target armv6-unknown-linux-gnueabihf -Ffoo -framework bar -Lbaz -lboo -Xlinker -undefined %s 2>&1 > %t.linux.txt
+// RUN: FileCheck -check-prefix LINUX-armv6 %s < %t.linux.txt
+
 // RUN: %swiftc_driver -driver-print-jobs -target armv7-unknown-linux-gnueabihf -Ffoo -framework bar -Lbaz -lboo -Xlinker -undefined %s 2>&1 > %t.linux.txt
 // RUN: FileCheck -check-prefix LINUX-armv7 %s < %t.linux.txt
 
@@ -24,6 +27,11 @@
 // RUN: %swiftc_driver -driver-print-jobs -target x86_64-apple-macosx10.9 -g %s | FileCheck -check-prefix DEBUG %s
 // RUN: %swiftc_driver -driver-print-jobs -target x86_64-apple-macosx10.10   %s | FileCheck -check-prefix NO_ARCLITE %s
 // RUN: %swiftc_driver -driver-print-jobs -target x86_64-apple-ios8.0        %s | FileCheck -check-prefix NO_ARCLITE %s
+
+// RUN: rm -rf %t && mkdir %t
+// RUN: touch %t/a.o
+// RUN: %swiftc_driver -driver-print-jobs -target x86_64-apple-macosx10.9 %s %t/a.o -o linker 2>&1 | FileCheck -check-prefix COMPILE_AND_LINK %s
+// RUN: %swiftc_driver -driver-print-jobs -target x86_64-apple-macosx10.9 %s %t/a.o -driver-use-filelists -o linker 2>&1 | FileCheck -check-prefix FILELIST %s
 
 // RUN: %swiftc_driver -driver-print-jobs -target x86_64-apple-macosx10.9 -emit-library %s -module-name LINKER | FileCheck -check-prefix INFERRED_NAME %s
 // RUN: %swiftc_driver -driver-print-jobs -target x86_64-apple-macosx10.9 -emit-library %s -o libLINKER.dylib | FileCheck -check-prefix INFERRED_NAME %s
@@ -108,6 +116,23 @@
 // LINUX-x86_64-DAG: -Xlinker -undefined
 // LINUX-x86_64: -o linker
 
+// LINUX-armv6: swift
+// LINUX-armv6: -o [[OBJECTFILE:.*]]
+
+// LINUX-armv6: clang++{{"? }}
+// LINUX-armv6-DAG: [[OBJECTFILE]]
+// LINUX-armv6-DAG: -lswiftCore
+// LINUX-armv6-DAG: -L [[STDLIB_PATH:[^ ]+/lib/swift]]
+// LINUX-armv6-DAG: --target=armv6-unknown-linux-gnueabihf
+// LINUX-armv6-DAG: -Xlinker -rpath -Xlinker [[STDLIB_PATH]]
+// LINUX-armv6-DAG: -Xlinker -T /{{[^ ]+}}/linux/armv6/swift.ld
+// LINUX-armv6-DAG: -F foo
+// LINUX-armv6-DAG: -framework bar
+// LINUX-armv6-DAG: -L baz
+// LINUX-armv6-DAG: -lboo
+// LINUX-armv6-DAG: -Xlinker -undefined
+// LINUX-armv6: -o linker
+
 // LINUX-armv7: swift
 // LINUX-armv7: -o [[OBJECTFILE:.*]]
 
@@ -115,6 +140,7 @@
 // LINUX-armv7-DAG: [[OBJECTFILE]]
 // LINUX-armv7-DAG: -lswiftCore
 // LINUX-armv7-DAG: -L [[STDLIB_PATH:[^ ]+/lib/swift]]
+// LINUX-armv7-DAG: --target=armv7-unknown-linux-gnueabihf
 // LINUX-armv7-DAG: -Xlinker -rpath -Xlinker [[STDLIB_PATH]]
 // LINUX-armv7-DAG: -Xlinker -T /{{[^ ]+}}/linux/armv7/swift.ld
 // LINUX-armv7-DAG: -F foo
@@ -148,6 +174,25 @@
 // NO_ARCLITE: bin/ld{{"? }}
 // NO_ARCLITE-NOT: arclite
 // NO_ARCLITE: -o {{[^ ]+}}
+
+
+// COMPILE_AND_LINK: bin/swift
+// COMPILE_AND_LINK-NOT: /a.o
+// COMPILE_AND_LINK: linker.swift
+// COMPILE_AND_LINK-NOT: /a.o
+// COMPILE_AND_LINK-NEXT: bin/ld{{"? }}
+// COMPILE_AND_LINK-DAG: /a.o
+// COMPILE_AND_LINK-DAG: .o
+// COMPILE_AND_LINK: -o linker
+
+
+// FILELIST: bin/ld{{"? }}
+// FILELIST-NOT: .o
+// FILELIST: -filelist {{"?[^-]}}
+// FILELIST-NOT: .o
+// FILELIST: /a.o
+// FILELIST-NOT: .o
+// FILELIST: -o linker
 
 
 // INFERRED_NAME: bin/swift

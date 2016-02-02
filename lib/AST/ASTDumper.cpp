@@ -1,8 +1,8 @@
-//===--- ASTDumper.cpp - Swift Language AST Dumper-------------------------===//
+//===--- ASTDumper.cpp - Swift Language AST Dumper ------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -19,6 +19,7 @@
 #include "swift/AST/ASTPrinter.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/ForeignErrorConvention.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/AST/TypeVisitor.h"
 #include "swift/Basic/STLExtras.h"
 #include "llvm/ADT/APFloat.h"
@@ -43,6 +44,42 @@ DEF_COLOR(TypeField, CYAN)
 
 #undef DEF_COLOR
 
+namespace {
+  /// RAII object that prints with the given color, if color is supported on the
+  /// given stream.
+  class PrintWithColorRAII {
+    raw_ostream &OS;
+    bool ShowColors;
+    
+  public:
+    PrintWithColorRAII(raw_ostream &os, llvm::raw_ostream::Colors color)
+    : OS(os), ShowColors(false)
+    {
+      if (&os == &llvm::errs() || &os == &llvm::outs())
+        ShowColors = llvm::errs().has_colors() && llvm::outs().has_colors();
+      
+      if (ShowColors) {
+        if (auto str = llvm::sys::Process::OutputColor(color, false, false)) {
+          OS << str;
+        }
+      }
+    }
+    
+    ~PrintWithColorRAII() {
+      if (ShowColors) {
+        OS << llvm::sys::Process::ResetColor();
+      }
+    }
+    
+    template<typename T>
+    friend raw_ostream &operator<<(PrintWithColorRAII &&printer,
+                                   const T &value){
+      printer.OS << value;
+      return printer.OS;
+    }
+  };
+} // end anonymous namespace
+
 //===----------------------------------------------------------------------===//
 //  Generic param list printing.
 //===----------------------------------------------------------------------===//
@@ -50,6 +87,20 @@ DEF_COLOR(TypeField, CYAN)
 void RequirementRepr::dump() const {
   print(llvm::errs());
   llvm::errs() << "\n";
+}
+
+Optional<std::tuple<StringRef, StringRef, RequirementReprKind>>
+RequirementRepr::getAsAnalyzedWrittenString() const {
+  if(AsWrittenString.empty())
+    return None;
+  auto Pair = AsWrittenString.split("==");
+  auto Kind = RequirementReprKind::SameType;
+  if (Pair.second.empty()) {
+    Pair = AsWrittenString.split(":");
+    Kind =  RequirementReprKind::TypeConstraint;
+  }
+  assert(!Pair.second.empty() && "cannot get second type.");
+  return std::make_tuple(Pair.first.trim(), Pair.second.trim(), Kind);
 }
 
 void RequirementRepr::printImpl(raw_ostream &out, bool AsWritten) const {
@@ -62,21 +113,16 @@ void RequirementRepr::printImpl(raw_ostream &out, bool AsWritten) const {
   };
 
   switch (getKind()) {
-  case RequirementKind::Conformance:
+  case RequirementReprKind::TypeConstraint:
     printTy(getSubjectLoc());
     out << " : ";
     printTy(getConstraintLoc());
     break;
 
-  case RequirementKind::SameType:
+  case RequirementReprKind::SameType:
     printTy(getFirstTypeLoc());
     out << " == ";
     printTy(getSecondTypeLoc());
-    break;
-
-  case RequirementKind::WitnessMarker:
-    out << "witness marker for ";
-    printTy(getFirstTypeLoc());
     break;
   }
 }
@@ -235,12 +281,6 @@ namespace {
       for (auto &elt : P->getElements()) {
         OS << '\n';
         printRec(elt.getPattern());
-        if (elt.hasEllipsis())
-          OS << " ellipsis";
-        if (elt.getInit()) {
-          OS << '\n';
-          printRec(elt.getInit()->getExpr());
-        }
       }
       OS << ')';
     }
@@ -339,6 +379,15 @@ namespace {
     void printRec(Pattern *P) { PrintPattern(OS, Indent+2).visit(P); }
     void printRec(TypeRepr *T);
 
+    // Print a field with a value.
+    template<typename T>
+    raw_ostream &printField(StringRef name, const T &value) {
+      OS << " ";
+      PrintWithColorRAII(OS, TypeFieldColor) << name;
+      OS << "=" << value;
+      return OS;
+    }
+
     void printCommon(Decl *D, const char *Name,
                      llvm::Optional<llvm::raw_ostream::Colors> Color =
                       llvm::Optional<llvm::raw_ostream::Colors>()) {
@@ -433,7 +482,7 @@ namespace {
       OS << ")";
     }
 
-    void printDeclName(ValueDecl *D) {
+    void printDeclName(const ValueDecl *D) {
       if (D->getFullName())
         OS << '\"' << D->getFullName() << '\"';
       else
@@ -471,6 +520,10 @@ namespace {
         OS << " default=";
         defaultDef.print(OS);
       }
+      
+      if (decl->isRecursive())
+        OS << " <<RECURSIVE>>";
+      
       OS << ")";
     }
 
@@ -613,15 +666,8 @@ namespace {
       }
     }
 
-    void visitParamDecl(ParamDecl *VD) {
-      printCommon(VD, "param_decl");
-      if (!VD->isLet())
-        OS << " var";
-      if (VD->getName() != VD->getArgumentName()) {
-        OS << " argument_name=";
-        printName(OS, VD->getArgumentName());
-      }
-      OS << ')';
+    void visitParamDecl(ParamDecl *PD) {
+      printParameter(PD);
     }
 
     void visitEnumCaseDecl(EnumCaseDecl *ECD) {
@@ -732,27 +778,88 @@ namespace {
           OS << ",resulttype=" << fec->getResultType().getString();
       }
     }
+    
+    void printParameter(const ParamDecl *P) {
+      OS.indent(Indent) << "(parameter ";
+      printDeclName(P);
+      if (!P->getArgumentName().empty())
+        OS << " apiName=" << P->getArgumentName();
+      
+      OS << " type=";
+      if (P->hasType()) {
+        OS << '\'';
+        P->getType().print(OS);
+        OS << '\'';
+      } else
+        OS << "<null type>";
+      
+      if (!P->isLet())
+        OS << " mutable";
+      
+      if (P->isVariadic())
+        OS << " variadic";
 
-    void printPatterns(StringRef Text, ArrayRef<Pattern*> Pats) {
-      if (Pats.empty())
-        return;
-      if (!Text.empty()) {
+      switch (P->getDefaultArgumentKind()) {
+      case DefaultArgumentKind::None: break;
+      case DefaultArgumentKind::Column:
+        printField("default_arg", "__COLUMN__");
+        break;
+      case DefaultArgumentKind::DSOHandle:
+        printField("default_arg", "__DSO_HANDLE__");
+        break;
+      case DefaultArgumentKind::File:
+        printField("default_arg", "__FILE__");
+        break;
+      case DefaultArgumentKind::Function:
+        printField("default_arg", "__FUNCTION__");
+        break;
+      case DefaultArgumentKind::Inherited:
+        printField("default_arg", "inherited");
+        break;
+      case DefaultArgumentKind::Line:
+        printField("default_arg", "__LINE__");
+        break;
+      case DefaultArgumentKind::Nil:
+        printField("default_arg", "nil");
+        break;
+      case DefaultArgumentKind::EmptyArray:
+        printField("default_arg", "[]");
+        break;
+      case DefaultArgumentKind::EmptyDictionary:
+        printField("default_arg", "[:]");
+        break;
+      case DefaultArgumentKind::Normal:
+        printField("default_arg", "normal");
+        break;
+      }
+      
+      if (auto init = P->getDefaultValue()) {
+        OS << " expression=\n";
+        printRec(init->getExpr());
+      }
+      
+      OS << ')';
+    }
+    
+
+    void printParameterList(const ParameterList *params) {
+      OS.indent(Indent) << "(parameter_list";
+      Indent += 2;
+      for (auto P : *params) {
         OS << '\n';
-        Indent += 2;
-        OS.indent(Indent) << '(' << Text;
+        printParameter(P);
       }
-      for (auto P : Pats) {
-        OS << '\n';
-        printRec(P);
-      }
-      if (!Text.empty()) {
-        OS << ')';
-        Indent -= 2;
-      }
+      OS << ')';
+      Indent -= 2;
     }
 
     void printAbstractFunctionDecl(AbstractFunctionDecl *D) {
-      printPatterns("body_params", D->getBodyParamPatterns());
+      for (auto pl : D->getParameterLists()) {
+        OS << '\n';
+        Indent += 2;
+        printParameterList(pl);
+        Indent -= 2;
+     }
       if (auto FD = dyn_cast<FuncDecl>(D)) {
         if (FD->getBodyResultTypeLoc().getTypeRepr()) {
           OS << '\n';
@@ -859,7 +966,7 @@ namespace {
       OS.indent(Indent) << "(#if_decl\n";
       Indent += 2;
       for (auto &Clause : ICD->getClauses()) {
-        OS.indent(Indent) << (Clause.Cond ? "(#if:\n" : "#else");
+        OS.indent(Indent) << (Clause.Cond ? "(#if:\n" : "\n(#else:\n");
         if (Clause.Cond)
           printRec(Clause.Cond);
         
@@ -867,6 +974,8 @@ namespace {
           OS << '\n';
           printRec(D);
         }
+
+        OS << ')';
       }
     
       Indent -= 2;
@@ -904,6 +1013,26 @@ namespace {
   };
 } // end anonymous namespace.
 
+void ParameterList::dump() const {
+  dump(llvm::errs(), 0);
+}
+
+void ParameterList::dump(raw_ostream &OS, unsigned Indent) const {
+  llvm::Optional<llvm::SaveAndRestore<bool>> X;
+  
+  // Make sure to print type variables if we can get to ASTContext.
+  if (size() != 0 && get(0)) {
+    auto &ctx = get(0)->getASTContext();
+    X.emplace(llvm::SaveAndRestore<bool>(ctx.LangOpts.DebugConstraintSolver,
+                                         true));
+  }
+  
+  PrintDecl(OS, Indent).printParameterList(this);
+  llvm::errs() << '\n';
+}
+
+
+
 void Decl::dump() const {
   dump(llvm::errs(), 0);
 }
@@ -913,7 +1042,7 @@ void Decl::dump(raw_ostream &OS, unsigned Indent) const {
   llvm::SaveAndRestore<bool> X(getASTContext().LangOpts.DebugConstraintSolver,
                                true);
   PrintDecl(OS, Indent).visit(const_cast<Decl *>(this));
-  llvm::errs() << '\n';
+  OS << '\n';
 }
 
 /// Print the given declaration context (with its parents).
@@ -986,6 +1115,9 @@ static void printContext(raw_ostream &os, DeclContext *dc) {
       os << "deinit";
     break;
   }
+  case DeclContextKind::SubscriptDecl:
+    os << "subscript decl";
+    break;
   }
 }
 
@@ -1489,7 +1621,7 @@ public:
 
   void visitObjectLiteralExpr(ObjectLiteralExpr *E) {
     printCommon(E, "object_literal")
-      << " name=" << E->getName().str();
+      << " name=" << E->getName();
     OS << '\n';
     printRec(E->getArg());
   }
@@ -1531,14 +1663,9 @@ public:
     E->getDeclRef().dump(OS);
     OS << ')';
   }
-  void visitUnresolvedConstructorExpr(UnresolvedConstructorExpr *E) {
-    printCommon(E, "unresolved_constructor") << '\n';
-    printRec(E->getSubExpr());
-    OS << ')';
-  }
   void visitOverloadedDeclRefExpr(OverloadedDeclRefExpr *E) {
     printCommon(E, "overloaded_decl_ref_expr")
-      << " name=" << E->getDecls()[0]->getName().str()
+      << " name=" << E->getDecls()[0]->getName()
       << " #decls=" << E->getDecls().size()
       << " specialized=" << (E->isSpecialized()? "yes" : "no");
 
@@ -1551,7 +1678,7 @@ public:
   }
   void visitOverloadedMemberRefExpr(OverloadedMemberRefExpr *E) {
     printCommon(E, "overloaded_member_ref_expr")
-      << " name=" << E->getDecls()[0]->getName().str()
+      << " name=" << E->getDecls()[0]->getName()
       << " #decls=" << E->getDecls().size() << "\n";
     printRec(E->getBase());
     for (ValueDecl *D : E->getDecls()) {
@@ -1685,16 +1812,7 @@ public:
   }
   void visitUnresolvedDotExpr(UnresolvedDotExpr *E) {
     printCommon(E, "unresolved_dot_expr")
-      << " field '" << E->getName().str() << "'";
-    if (E->getBase()) {
-      OS << '\n';
-      printRec(E->getBase());
-    }
-    OS << ')';
-  }
-  void visitUnresolvedSelectorExpr(UnresolvedSelectorExpr *E) {
-    printCommon(E, "unresolved_selector_expr")
-      << " selector '" << E->getName() << "'";
+      << " field '" << E->getName() << "'";
     if (E->getBase()) {
       OS << '\n';
       printRec(E->getBase());
@@ -1871,6 +1989,7 @@ public:
   void visitCaptureListExpr(CaptureListExpr *E) {
     printCommon(E, "capture_list");
     for (auto capture : E->getCaptureList()) {
+      OS << '\n';
       Indent += 2;
       printRec(capture.Var);
       printRec(capture.Init);
@@ -1887,24 +2006,39 @@ public:
       OS << " ";
       E->getCaptureInfo().print(OS);
     }
+    
     return OS;
   }
 
-  void visitClosureExpr(ClosureExpr *expr) {
-    printClosure(expr, "closure_expr");
-    if (expr->hasSingleExpressionBody())
+  void visitClosureExpr(ClosureExpr *E) {
+    printClosure(E, "closure_expr");
+    if (E->hasSingleExpressionBody())
       OS << " single-expression";
+    if (E->isVoidConversionClosure())
+      OS << " void-conversion";
+    
+    if (E->getParameters()) {
+      OS << '\n';
+      PrintDecl(OS, Indent+2).printParameterList(E->getParameters());
+    }
+    
     OS << '\n';
-
-    if (expr->hasSingleExpressionBody()) {
-      printRec(expr->getSingleExpressionBody());
+    if (E->hasSingleExpressionBody()) {
+      printRec(E->getSingleExpressionBody());
     } else {
-      printRec(expr->getBody());
+      printRec(E->getBody());
     }
     OS << ')';
   }
   void visitAutoClosureExpr(AutoClosureExpr *E) {
     printClosure(E, "autoclosure_expr") << '\n';
+    
+    if (E->getParameters()) {
+      OS << '\n';
+      PrintDecl(OS, Indent+2).printParameterList(E->getParameters());
+    }
+
+    OS << '\n';
     printRec(E->getSingleExpressionBody());
     OS << ')';
   }
@@ -1964,9 +2098,9 @@ public:
     printCommon(E, name) << ' ';
     if (auto checkedCast = dyn_cast<CheckedCastExpr>(E))
       OS << getCheckedCastKindName(checkedCast->getCastKind()) << ' ';
-    OS << "writtenType=";
+    OS << "writtenType='";
     E->getCastTypeLoc().getType().print(OS);
-    OS << '\n';
+    OS << "'\n";
     printRec(E->getSubExpr());
     OS << ')';
   }
@@ -2048,6 +2182,16 @@ public:
       OS << '\n';
       printRec(ExpTyR);
     }
+    OS << ')';
+  }
+  void visitObjCSelectorExpr(ObjCSelectorExpr *E) {
+    printCommon(E, "objc_selector_expr") << " decl=";
+    if (auto method = E->getMethod())
+      method->dumpRef(OS);
+    else
+      OS << "<unresolved>";
+    OS << '\n';
+    printRec(E->getSubExpr());
     OS << ')';
   }
 };
@@ -2168,10 +2312,6 @@ public:
   void visitArrayTypeRepr(ArrayTypeRepr *T) {
     printCommon(T, "type_array") << '\n';
     printRec(T->getBase());
-    if (T->getSize()) {
-      OS << '\n';
-      printRec(T->getSize()->getExpr());
-    }
     OS << ')';
   }
 
@@ -2195,7 +2335,7 @@ public:
   void visitNamedTypeRepr(NamedTypeRepr *T) {
     printCommon(T, "type_named");
     if (T->hasName())
-      OS << " id='" << T->getName();
+      OS << " id=" << T->getName();
     if (T->getTypeRepr()) {
       OS << '\n';
       printRec(T->getTypeRepr());
@@ -2253,15 +2393,25 @@ void Substitution::dump() const {
   if (!Conformance.size()) return;
 
   os << '[';
-  for (const auto *c : Conformance) {
-    os << ' ';
-    if (c) {
-      c->printName(os);
+  bool first = true;
+  for (auto &c : Conformance) {
+    if (first) {
+      first = false;
     } else {
-      os << "nullptr";
+      os << ' ';
     }
+    c.dump();
   }
   os << " ]";
+}
+
+void ProtocolConformanceRef::dump() const {
+  llvm::raw_ostream &os = llvm::errs();
+  if (isConcrete()) {
+    getConcrete()->printName(os);
+  } else {
+    os << "abstract:" << getAbstract()->getName();
+  }
 }
 
 void swift::dump(const ArrayRef<Substitution> &subs) {
@@ -2284,40 +2434,6 @@ void ProtocolConformance::dump() const {
 //===----------------------------------------------------------------------===//
 
 namespace {
-  /// RAII object that prints with the given color, if color is supported on the
-  /// given stream.
-  class PrintWithColorRAII {
-    raw_ostream &OS;
-    bool ShowColors;
-
-  public:
-    PrintWithColorRAII(raw_ostream &os, llvm::raw_ostream::Colors color)
-      : OS(os), ShowColors(false)
-    {
-      if (&os == &llvm::errs() || &os == &llvm::outs())
-        ShowColors = llvm::errs().has_colors() && llvm::outs().has_colors();
-
-      if (ShowColors) {
-        if (auto str = llvm::sys::Process::OutputColor(color, false, false)) {
-          OS << str;
-        }
-      }
-    }
-
-    ~PrintWithColorRAII() {
-      if (ShowColors) {
-        OS << llvm::sys::Process::ResetColor();
-      }
-    }
-
-    template<typename T>
-    friend raw_ostream &operator<<(PrintWithColorRAII &&printer,
-                                   const T &value){
-      printer.OS << value;
-      return printer.OS;
-    }
-  };
-
   class PrintType : public TypeVisitor<PrintType, void, StringRef> {
     raw_ostream &OS;
     unsigned Indent;
@@ -2441,31 +2557,43 @@ namespace {
           break;
 
         case DefaultArgumentKind::Column:
-          printFlag("default_arg", "__COLUMN__");
+          printField("default_arg", "__COLUMN__");
           break;
 
         case DefaultArgumentKind::DSOHandle:
-          printFlag("default_arg", "__DSO_HANDLE__");
+          printField("default_arg", "__DSO_HANDLE__");
           break;
 
         case DefaultArgumentKind::File:
-          printFlag("default_arg", "__FILE__");
+          printField("default_arg", "__FILE__");
           break;
 
         case DefaultArgumentKind::Function:
-          printFlag("default_arg", "__FUNCTION__");
+          printField("default_arg", "__FUNCTION__");
           break;
 
         case DefaultArgumentKind::Inherited:
-          printFlag("default_arg", "inherited");
+          printField("default_arg", "inherited");
           break;
 
         case DefaultArgumentKind::Line:
-          printFlag("default_arg", "__LINE__");
+          printField("default_arg", "__LINE__");
+          break;
+
+        case DefaultArgumentKind::Nil:
+          printField("default_arg", "nil");
+          break;
+
+        case DefaultArgumentKind::EmptyArray:
+          printField("default_arg", "[]");
+          break;
+
+        case DefaultArgumentKind::EmptyDictionary:
+          printField("default_arg", "[:]");
           break;
 
         case DefaultArgumentKind::Normal:
-          printFlag("default_arg", "normal");
+          printField("default_arg", "normal");
           break;
         }
 

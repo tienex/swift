@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -267,13 +267,14 @@ private:
   /// \see EntryPointInfoTy
   EntryPointInfoTy EntryPointInfo;
 
-  enum class Flags {
-    TestingEnabled = 1 << 0,
-    FailedToLoad = 1 << 1
-  };
+  struct {
+    unsigned TestingEnabled : 1;
+    unsigned FailedToLoad : 1;
+    unsigned ResilienceEnabled : 1;
+  } Flags;
 
   /// The magic __dso_handle variable.
-  llvm::PointerIntPair<VarDecl *, 2, OptionSet<Flags>> DSOHandleAndFlags;
+  VarDecl *DSOHandle;
 
   ModuleDecl(Identifier name, ASTContext &ctx);
 
@@ -315,18 +316,28 @@ public:
 
   /// Returns true if this module was or is being compiled for testing.
   bool isTestingEnabled() const {
-    return DSOHandleAndFlags.getInt().contains(Flags::TestingEnabled);
+    return Flags.TestingEnabled;
   }
   void setTestingEnabled(bool enabled = true) {
-    DSOHandleAndFlags.setInt(DSOHandleAndFlags.getInt()|Flags::TestingEnabled);
+    Flags.TestingEnabled = enabled;
   }
 
   /// Returns true if there was an error trying to load this module.
   bool failedToLoad() const {
-    return DSOHandleAndFlags.getInt().contains(Flags::FailedToLoad);
+    return Flags.FailedToLoad;
   }
   void setFailedToLoad(bool failed = true) {
-    DSOHandleAndFlags.setInt(DSOHandleAndFlags.getInt() | Flags::FailedToLoad);
+    Flags.FailedToLoad = failed;
+  }
+
+  /// Returns true if this module is compiled for resilience enabled,
+  /// meaning the module is expected to evolve without recompiling
+  /// clients that link against it.
+  bool isResilienceEnabled() const {
+    return Flags.ResilienceEnabled;
+  }
+  void setResilienceEnabled(bool enabled = true) {
+    Flags.ResilienceEnabled = enabled;
   }
 
   /// Look up a (possibly overloaded) value set at top-level scope
@@ -408,6 +419,11 @@ public:
   void lookupMember(SmallVectorImpl<ValueDecl*> &results,
                     DeclContext *container, DeclName name,
                     Identifier privateDiscriminator) const;
+
+  /// Find all Objective-C methods with the given selector.
+  void lookupObjCMethods(
+         ObjCSelector selector,
+         SmallVectorImpl<AbstractFunctionDecl *> &results) const;
 
   /// \sa getImportedModules
   enum class ImportFilter {
@@ -572,7 +588,7 @@ private:
 public:
   // Only allow allocation of Modules using the allocator in ASTContext
   // or by doing a placement new.
-  void *operator new(size_t Bytes, ASTContext &C,
+  void *operator new(size_t Bytes, const ASTContext &C,
                      unsigned Alignment = alignof(ModuleDecl));
 };
 
@@ -638,6 +654,11 @@ public:
   virtual void lookupClassMember(ModuleDecl::AccessPathTy accessPath,
                                  DeclName name,
                                  SmallVectorImpl<ValueDecl*> &results) const {}
+
+  /// Find all Objective-C methods with the given selector.
+  virtual void lookupObjCMethods(
+                 ObjCSelector selector,
+                 SmallVectorImpl<AbstractFunctionDecl *> &results) const = 0;
 
   /// Returns the comment attached to the given declaration.
   ///
@@ -804,6 +825,10 @@ public:
   
   void getTopLevelDecls(SmallVectorImpl<Decl*> &results) const override;
 
+  void lookupObjCMethods(
+         ObjCSelector selector,
+         SmallVectorImpl<AbstractFunctionDecl *> &results) const override;
+
   Identifier
   getDiscriminatorForPrivateValue(const ValueDecl *D) const override {
     llvm_unreachable("no private decls in the derived file unit");
@@ -903,6 +928,11 @@ public:
   /// complete, we diagnose.
   std::map<DeclAttrKind, const DeclAttribute *> AttrsRequiringFoundation;
 
+  /// A mapping from Objective-C selectors to the methods that have
+  /// those selectors.
+  llvm::DenseMap<ObjCSelector, llvm::TinyPtrVector<AbstractFunctionDecl *>>
+    ObjCMethods;
+
   template <typename T>
   using OperatorMap = llvm::DenseMap<Identifier,llvm::PointerIntPair<T,1,bool>>;
 
@@ -958,6 +988,10 @@ public:
   virtual void
   lookupClassMember(ModuleDecl::AccessPathTy accessPath, DeclName name,
                     SmallVectorImpl<ValueDecl*> &results) const override;
+
+  void lookupObjCMethods(
+         ObjCSelector selector,
+         SmallVectorImpl<AbstractFunctionDecl *> &results) const override;
 
   virtual void getTopLevelDecls(SmallVectorImpl<Decl*> &results) const override;
 
@@ -1119,6 +1153,11 @@ public:
   virtual void lookupValue(ModuleDecl::AccessPathTy accessPath, DeclName name,
                            NLKind lookupKind,
                            SmallVectorImpl<ValueDecl*> &result) const override;
+
+  /// Find all Objective-C methods with the given selector.
+  void lookupObjCMethods(
+         ObjCSelector selector,
+         SmallVectorImpl<AbstractFunctionDecl *> &results) const override;
 
   Identifier
   getDiscriminatorForPrivateValue(const ValueDecl *D) const override {

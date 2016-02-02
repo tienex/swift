@@ -1,8 +1,8 @@
-//===--- ModuleFile.cpp - Loading a serialized module -----------*- C++ -*-===//
+//===--- ModuleFile.cpp - Loading a serialized module ---------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -108,6 +108,9 @@ static bool readOptionsBlock(llvm::BitstreamCursor &cursor,
       break;
     case options_block::IS_TESTABLE:
       extendedInfo.setIsTestable(true);
+      break;
+    case options_block::IS_RESILIENT:
+      extendedInfo.setIsResilient(true);
       break;
     default:
       // Unknown options record, possibly for use by a future version of the
@@ -1220,7 +1223,7 @@ void ModuleFile::getImportDecls(SmallVectorImpl<Decl *> &Results) {
 
         if (!M) {
           // The dependency module could not be loaded.  Just make a guess
-          // about the import kind, we can not do better.
+          // about the import kind, we cannot do better.
           Kind = ImportKind::Func;
         } else {
           SmallVector<ValueDecl *, 8> Decls;
@@ -1405,6 +1408,25 @@ void ModuleFile::lookupClassMembers(Module::AccessPathTy accessPath,
   }
 }
 
+void ModuleFile::lookupObjCMethods(
+       ObjCSelector selector,
+       SmallVectorImpl<AbstractFunctionDecl *> &results) {
+  // If we don't have an Objective-C method table, there's nothing to do.
+  if (!ObjCMethods) return;
+
+  // Look for all methods in the module file with this selector.
+  auto known = ObjCMethods->find(selector);
+  if (known == ObjCMethods->end()) return;
+
+  auto found = *known;
+  for (const auto &result : found) {
+    // Deserialize the method and add it to the list.
+    if (auto func = dyn_cast_or_null<AbstractFunctionDecl>(
+                      getDecl(std::get<2>(result))))
+      results.push_back(func);
+  }
+}
+
 void
 ModuleFile::collectLinkLibraries(Module::LinkLibraryCallback callback) const {
   for (auto &lib : LinkLibraries)
@@ -1466,7 +1488,7 @@ Optional<BriefAndRawComment> ModuleFile::getCommentForDecl(const Decl *D) {
   // Keep these as assertions instead of early exits to ensure that we are not
   // doing extra work.  These cases should be handled by clients of this API.
   assert(!D->hasClangNode() &&
-         "can not find comments for Clang decls in Swift modules");
+         "cannot find comments for Clang decls in Swift modules");
   assert(D->getDeclContext()->getModuleScopeContext() == FileContext &&
          "Decl is from a different serialized file");
 

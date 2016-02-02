@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -119,7 +119,7 @@ ide::isSourceInputComplete(std::unique_ptr<llvm::MemoryBuffer> MemBuf) {
   const char *SourceStart = Buffer.data();
   const char *SourceEnd = Buffer.data() + Buffer.size();
   const char *LineStart = SourceStart;
-  const char *LineSourceStart = NULL;
+  const char *LineSourceStart = nullptr;
   uint32_t LineIndent = 0;
   struct IndentInfo {
     StringRef Prefix;
@@ -134,7 +134,7 @@ ide::isSourceInputComplete(std::unique_ptr<llvm::MemoryBuffer> MemBuf) {
     case '\r':
     case '\n':
       LineIndent = 0;
-      LineSourceStart = NULL;
+      LineSourceStart = nullptr;
       LineStart = p + 1;
       break;
 
@@ -146,7 +146,7 @@ ide::isSourceInputComplete(std::unique_ptr<llvm::MemoryBuffer> MemBuf) {
     case '(':
     case '[':
       ++LineIndent;
-      if (LineSourceStart == NULL)
+      if (LineSourceStart == nullptr)
         IndentInfos.push_back(IndentInfo(LineStart,
                                          p - LineStart,
                                          LineIndent));
@@ -166,7 +166,7 @@ ide::isSourceInputComplete(std::unique_ptr<llvm::MemoryBuffer> MemBuf) {
       break;
   
     default:
-      if (LineSourceStart == NULL && !isspace(*p))
+      if (LineSourceStart == nullptr && !isspace(*p))
         LineSourceStart = p;
       break;
     }
@@ -189,7 +189,7 @@ SourceCompleteResult ide::isSourceInputComplete(StringRef Text) {
 }
 
 // Adjust the cc1 triple string we got from clang, to make sure it will be
-// accepted when it goes throught the swift clang importer.
+// accepted when it goes through the swift clang importer.
 static std::string adjustClangTriple(StringRef TripleStr) {
   std::string Result;
   llvm::raw_string_ostream OS(Result);
@@ -202,6 +202,14 @@ static std::string adjustClangTriple(StringRef TripleStr) {
     OS << "armv7s"; break;
   case llvm::Triple::SubArchType::ARMSubArch_v7k:
     OS << "armv7k"; break;
+  case llvm::Triple::SubArchType::ARMSubArch_v6:
+    OS << "armv6"; break;
+  case llvm::Triple::SubArchType::ARMSubArch_v6m:
+    OS << "armv6m"; break;
+  case llvm::Triple::SubArchType::ARMSubArch_v6k:
+    OS << "armv6k"; break;
+  case llvm::Triple::SubArchType::ARMSubArch_v6t2:
+    OS << "armv6t2"; break;
   default:
     // Adjust i386-macosx to x86_64 because there is no Swift stdlib for i386.
     if ((Triple.getOS() == llvm::Triple::MacOSX ||

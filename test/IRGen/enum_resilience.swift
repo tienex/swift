@@ -13,14 +13,14 @@ import resilient_struct
 // CHECK: %O15enum_resilience6Either = type <{ [[REFERENCE_TYPE:\[(4|8) x i8\]]], [1 x i8] }>
 
 // Public resilient struct contains a public resilient struct,
-// can use spare bits (FIXME)
+// can use spare bits
 
-// CHECK: %O15enum_resilience15ResilientEither = type <{ [[REFERENCE_TYPE]], [1 x i8] }>
+// CHECK: %O15enum_resilience15ResilientEither = type <{ [[REFERENCE_TYPE]] }>
 
 // Internal fixed layout struct contains a public resilient struct,
-// can use spare bits (FIXME)
+// can use spare bits
 
-// CHECK: %O15enum_resilience14InternalEither = type <{ [[REFERENCE_TYPE]], [1 x i8] }>
+// CHECK: %O15enum_resilience14InternalEither = type <{ [[REFERENCE_TYPE]] }>
 
 // Public fixed layout struct contains a fixed layout struct,
 // can use spare bits
@@ -99,7 +99,7 @@ public func constructResilientEnumNoPayload() -> Medium {
 // CHECK-NEXT: [[WITNESS_ADDR:%.*]] = getelementptr inbounds i8*, i8** [[VWT]], i32 25
 // CHECK-NEXT: [[WITNESS:%.*]] = load i8*, i8** [[WITNESS_ADDR]]
 // CHECK-NEXT: [[WITNESS_FN:%.*]] = bitcast i8* [[WITNESS]]
-// CHECK-NEXT: call void [[WITNESS_FN]](%swift.opaque* %0, i32 2, %swift.type* [[METADATA]])
+// CHECK-NEXT: call void [[WITNESS_FN]](%swift.opaque* %0, i32 0, %swift.type* [[METADATA]])
 
 // CHECK-NEXT: ret void
   return Medium.Paper
@@ -125,7 +125,7 @@ public func constructResilientEnumPayload(s: Size) -> Medium {
 // CHECK-NEXT: [[WITNESS_ADDR:%.*]] = getelementptr inbounds i8*, i8** [[VWT2]], i32 25
 // CHECK-NEXT: [[WITNESS:%.*]] = load i8*, i8** [[WITNESS_ADDR]]
 // CHECK-NEXT: [[WITNESS_FN:%.*]] = bitcast i8* [[WITNESS]]
-// CHECK-NEXT: call void [[WITNESS_FN]](%swift.opaque* %0, i32 1, %swift.type* [[METADATA2]])
+// CHECK-NEXT: call void [[WITNESS_FN]](%swift.opaque* %0, i32 -2, %swift.type* [[METADATA2]])
 
 // CHECK-NEXT: [[WITNESS_ADDR:%.*]] = getelementptr inbounds i8*, i8** [[VWT]], i32 4
 // CHECK-NEXT: [[WITNESS:%.*]] = load i8*, i8** [[WITNESS_ADDR]]
@@ -155,9 +155,9 @@ public func constructResilientEnumPayload(s: Size) -> Medium {
 // CHECK: [[TAG:%.*]] = call i32 %getEnumTag(%swift.opaque* [[ENUM_COPY]], %swift.type* [[METADATA]])
 
 // CHECK: switch i32 [[TAG]], label %[[DEFAULT_CASE:.*]] [
-// CHECK:   i32 0, label %[[PAMPHLET_CASE:.*]]
-// CHECK:   i32 2, label %[[PAPER_CASE:.*]]
-// CHECK:   i32 3, label %[[CANVAS_CASE:.*]]
+// CHECK:   i32 -1, label %[[PAMPHLET_CASE:.*]]
+// CHECK:   i32 0, label %[[PAPER_CASE:.*]]
+// CHECK:   i32 1, label %[[CANVAS_CASE:.*]]
 // CHECK: ]
 
 // CHECK: ; <label>:[[PAPER_CASE]]
@@ -201,3 +201,43 @@ public func resilientEnumPartialApply(f: Medium -> Int) {
 }
 
 // CHECK-LABEL: define internal void @_TPA__TTRXFo_iO14resilient_enum6Medium_dSi_XFo_iS0__iSi_(%Si* noalias nocapture sret, %swift.opaque* noalias nocapture, %swift.refcounted*)
+
+
+// Enums with resilient payloads from a different resilience domain
+// require runtime metadata instantiation, just like generics.
+
+public enum EnumWithResilientPayload {
+  case OneSize(Size)
+  case TwoSizes(Size, Size)
+}
+
+// Make sure we call a function to access metadata of enums with
+// resilient layout.
+
+// CHECK-LABEL: define %swift.type* @_TF15enum_resilience20getResilientEnumTypeFT_PMP_()
+// CHECK:      [[METADATA:%.*]] = call %swift.type* @_TMaO15enum_resilience24EnumWithResilientPayload()
+// CHECK-NEXT: ret %swift.type* [[METADATA]]
+
+public func getResilientEnumType() -> Any.Type {
+  return EnumWithResilientPayload.self
+}
+
+// Public metadata accessor for our resilient enum
+// CHECK-LABEL: define %swift.type* @_TMaO15enum_resilience24EnumWithResilientPayload()
+// CHECK: [[METADATA:%.*]] = load %swift.type*, %swift.type** @_TMLO15enum_resilience24EnumWithResilientPayload
+// CHECK-NEXT: [[COND:%.*]] = icmp eq %swift.type* [[METADATA]], null
+// CHECK-NEXT: br i1 [[COND]], label %cacheIsNull, label %cont
+
+// CHECK: cacheIsNull:
+// CHECK-NEXT: [[METADATA2:%.*]] = call %swift.type* @swift_getResilientMetadata
+// CHECK-NEXT: store %swift.type* [[METADATA2]], %swift.type** @_TMLO15enum_resilience24EnumWithResilientPayload
+// CHECK-NEXT: br label %cont
+
+// CHECK: cont:
+// CHECK-NEXT: [[RESULT:%.*]] = phi %swift.type* [ [[METADATA]], %entry ], [ [[METADATA2]], %cacheIsNull ]
+// CHECK-NEXT: ret %swift.type* [[RESULT]]
+
+
+// FIXME: this is bogus
+
+// CHECK-LABEL: define private %swift.type* @create_generic_metadata_EnumWithResilientPayload(%swift.type_pattern*, i8**)

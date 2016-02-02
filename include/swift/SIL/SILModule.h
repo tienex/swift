@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -45,8 +45,6 @@ namespace swift {
   class AnyFunctionType;
   class ASTContext;
   class FuncDecl;
-  class SILExternalSource;
-  class SILTypeList;
   class SILUndef;
   class SourceFile;
   class SerializedSILLoader;
@@ -99,7 +97,6 @@ private:
 
   /// Allocator that manages the memory of all the pieces of the SILModule.
   mutable llvm::BumpPtrAllocator BPA;
-  void *TypeListUniquing;
 
   /// The swift Module associated with this SILModule.
   ModuleDecl *TheSwiftModule;
@@ -173,9 +170,6 @@ private:
   /// optimizations can assume that they see the whole module.
   bool wholeModule;
 
-  /// The external SIL source to use when linking this module.
-  SILExternalSource *ExternalSource = nullptr;
-
   /// The options passed into this SILModule.
   SILOptions &Options;
 
@@ -207,9 +201,6 @@ public:
   /// Send the invalidation message that \p V is being deleted to all
   /// registered handlers. The order of handlers is deterministic but arbitrary.
   void notifyDeleteHandlers(ValueBase *V);
-
-  /// \brief Get a uniqued pointer to a SIL type list.
-  SILTypeList *getSILTypeList(ArrayRef<SILType> Types) const;
 
   /// \brief This converts Swift types to SILTypes.
   mutable Lowering::TypeConverter Types;
@@ -463,14 +454,16 @@ public:
   ///
   /// \arg C The protocol conformance mapped key to use to lookup the witness
   ///        table.
-  /// \arg deserializeLazily If we can not find the witness table should we
+  /// \arg deserializeLazily If we cannot find the witness table should we
   ///                        attempt to lazily deserialize it.
+  std::pair<SILWitnessTable *, ArrayRef<Substitution>>
+  lookUpWitnessTable(ProtocolConformanceRef C, bool deserializeLazily=true);
   std::pair<SILWitnessTable *, ArrayRef<Substitution>>
   lookUpWitnessTable(const ProtocolConformance *C, bool deserializeLazily=true);
 
   /// Attempt to lookup \p Member in the witness table for C.
   std::tuple<SILFunction *, SILWitnessTable *, ArrayRef<Substitution>>
-  lookUpFunctionInWitnessTable(const ProtocolConformance *C, SILDeclRef Member);
+  lookUpFunctionInWitnessTable(ProtocolConformanceRef C, SILDeclRef Member);
 
   /// Look up the VTable mapped to the given ClassDecl. Returns null on failure.
   SILVTable *lookUpVTable(const ClassDecl *C);
@@ -491,12 +484,6 @@ public:
   void setStage(SILStage s) {
     assert(s >= Stage && "regressing stage?!");
     Stage = s;
-  }
-
-  SILExternalSource *getExternalSource() const { return ExternalSource; }
-  void setExternalSource(SILExternalSource *S) {
-    assert(!ExternalSource && "External source already set");
-    ExternalSource = S;
   }
 
   /// \brief Run the SIL verifier to make sure that all Functions follow

@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -25,6 +25,7 @@
 
 namespace swift {
 namespace irgen {
+  enum IsExact_t : bool;
 
 /// The metadata value can be fulfilled by following the given metadata
 /// path from the given source.
@@ -46,18 +47,42 @@ class FulfillmentMap {
   llvm::DenseMap<FulfillmentKey, Fulfillment> Fulfillments;
 
 public:
-  /// Given that we have metadata for a type, is it exactly of the
-  /// specified type, or might it be a subtype?
-  enum IsExact_t : bool { IsInexact = false, IsExact = true };
-
   struct InterestingKeysCallback {
+    /// Is the given type something that we should add fulfillments for?
     virtual bool isInterestingType(CanType type) const = 0;
+
+    /// Is the given type expressed in terms of types that we should add
+    /// fulfillments for?
+    ///
+    /// It's okay to conservatively return true here.
+    virtual bool hasInterestingType(CanType type) const = 0;
+
+    /// Are we only interested in a subset of the conformances for a
+    /// given type?
+    virtual bool hasLimitedInterestingConformances(CanType type) const = 0;
+
+    /// Return the limited interesting conformances for an interesting type.
     virtual GenericSignature::ConformsToArray
       getInterestingConformances(CanType type) const = 0;
+
     virtual ~InterestingKeysCallback() = default;
   };
 
+  /// An implementation of InterestingKeysCallback that returns everything
+  /// fulfillable.
+  struct Everything : InterestingKeysCallback {
+    bool isInterestingType(CanType type) const override;
+    bool hasInterestingType(CanType type) const override;
+    bool hasLimitedInterestingConformances(CanType type) const override;
+    GenericSignature::ConformsToArray
+      getInterestingConformances(CanType type) const override;
+  };
+
   FulfillmentMap() = default;
+
+  using iterator = decltype(Fulfillments)::iterator;
+  iterator begin() { return Fulfillments.begin(); }
+  iterator end() { return Fulfillments.end(); }
 
   /// Is it even theoretically possible that we might find a fulfillment
   /// in the given type?
@@ -72,7 +97,14 @@ public:
   /// \return true if any fulfillments were added by this search.
   bool searchTypeMetadata(ModuleDecl &M, CanType type, IsExact_t isExact,
                           unsigned sourceIndex, MetadataPath &&path,
-                    const InterestingKeysCallback *interestingKeys = nullptr);
+                          const InterestingKeysCallback &interestingKeys);
+
+  /// Search the given witness table for useful fulfillments.
+  ///
+  /// \return true if any fulfillments were added by this search.
+  bool searchWitnessTable(ModuleDecl &M, CanType type, ProtocolDecl *protocol,
+                          unsigned sourceIndex, MetadataPath &&path,
+                          const InterestingKeysCallback &interestingKeys);
 
   /// Register a fulfillment for the given key.
   ///
@@ -101,21 +133,31 @@ public:
 private:
   bool searchParentTypeMetadata(ModuleDecl &M, CanType parent,
                                 unsigned source, MetadataPath &&path,
-                          const InterestingKeysCallback *interestingKeys);
+                                const InterestingKeysCallback &keys);
 
   bool searchNominalTypeMetadata(ModuleDecl &M, CanNominalType type,
                                  unsigned source, MetadataPath &&path,
-                          const InterestingKeysCallback *interestingKeys);
+                                 const InterestingKeysCallback &keys);
 
   bool searchBoundGenericTypeMetadata(ModuleDecl &M, CanBoundGenericType type,
                                       unsigned source, MetadataPath &&path,
-                                const InterestingKeysCallback *interestingKeys);
+                                      const InterestingKeysCallback &keys);
 
   bool searchTypeArgConformances(ModuleDecl &M, CanType arg,
                                  ArchetypeType *param,
                                  unsigned source, const MetadataPath &path,
                                  unsigned argIndex,
-                           const InterestingKeysCallback *interestingKeys);
+                                 const InterestingKeysCallback &keys);
+
+  /// Search the given witness table for useful fulfillments.
+  ///
+  /// \return true if any fulfillments were added by this search.
+  bool searchWitnessTable(ModuleDecl &M, CanType type, ProtocolDecl *protocol,
+                          unsigned sourceIndex, MetadataPath &&path,
+                          const InterestingKeysCallback &interestingKeys,
+                          const llvm::SmallPtrSetImpl<ProtocolDecl*> *
+                            interestingConformances);
+
 };
 
 }

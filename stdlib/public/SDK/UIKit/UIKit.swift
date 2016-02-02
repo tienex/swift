@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -47,25 +47,23 @@ extension UIOffset : Equatable {}
 #if !os(watchOS) && !os(tvOS)
 public extension UIDeviceOrientation {
   var isLandscape: Bool {
-    get { return self == .LandscapeLeft || self == .LandscapeRight }
+    return self == .LandscapeLeft || self == .LandscapeRight
   }
 
   var isPortrait: Bool {
-    get { return self == .Portrait || self == .PortraitUpsideDown }
+    return self == .Portrait || self == .PortraitUpsideDown
   }
 
   var isFlat: Bool {
-    get { return self == .FaceUp || self == .FaceDown }
+    return self == .FaceUp || self == .FaceDown
   }
 
   var isValidInterfaceOrientation: Bool {
-    get {
-      switch (self) {
-        case .Portrait, .PortraitUpsideDown, .LandscapeLeft, .LandscapeRight:
-          return true
-        default:
-          return false
-      }
+    switch (self) {
+    case .Portrait, .PortraitUpsideDown, .LandscapeLeft, .LandscapeRight:
+      return true
+    default:
+      return false
     }
   }
 }
@@ -99,11 +97,11 @@ public func UIDeviceOrientationIsValidInterfaceOrientation(
 #if !os(watchOS) && !os(tvOS)
 public extension UIInterfaceOrientation {
   var isLandscape: Bool {
-    get { return self == .LandscapeLeft || self == .LandscapeRight }
+    return self == .LandscapeLeft || self == .LandscapeRight
   }
 
   var isPortrait: Bool {
-    get { return self == .Portrait || self == .PortraitUpsideDown }
+    return self == .Portrait || self == .PortraitUpsideDown
   }
 }
 
@@ -168,74 +166,37 @@ public extension UIAlertView {
 #endif
 
 #if !os(watchOS)
-struct _UIViewMirror : _MirrorType {
-  static var _views = NSMutableSet()
-
-  var _v : UIView
-  
-  init(_ v : UIView) { _v = v }
-  
-  var value: Any { get { return _v } }
-  
-  var valueType: Any.Type { get { return (_v as Any).dynamicType } }
-  
-  var objectIdentifier: ObjectIdentifier? { get { return .None } }
-  
-  var count: Int { get { return 0 } }
-  
-  subscript(_: Int) -> (String, _MirrorType) {
-    _preconditionFailure("_MirrorType access out of bounds")
-  }
-  
-  var summary: String { get { return "" } }
-  
-  var quickLookObject: PlaygroundQuickLook? {
-      // iOS 7 or greater only
-      
-      var result: PlaygroundQuickLook? = nil
-      
-      switch _UIViewMirror._views.member(_v) {
-        case nil:
-          _UIViewMirror._views.addObject(_v)
-          
-          let bounds = _v.bounds
-          // in case of an empty rectangle abort the logging
-          if (bounds.size.width == 0) || (bounds.size.height == 0) {
-            return nil
-          }
-      
-          UIGraphicsBeginImageContextWithOptions(bounds.size, false, 0.0)
-
-          // UIKit is about to update this to be optional, so make it work
-          // with both older and newer SDKs. (In this context it should always
-          // be present.)
-          let ctx: CGContext! = UIGraphicsGetCurrentContext()
-          UIColor(white:1.0, alpha:0.0).set()
-          CGContextFillRect(ctx, bounds)
-          _v.layer.renderInContext(ctx)
-
-          let image: UIImage! = UIGraphicsGetImageFromCurrentImageContext()
-      
-          UIGraphicsEndImageContext()
-      
-          result = .Some(.View(image))
-
-          _UIViewMirror._views.removeObject(_v)
-          
-        default: ()
-      }
-
-
-      return result
-  }
-  
-  var disposition : _MirrorDisposition { get { return .Aggregate } }
+internal struct _UIViewQuickLookState {
+  static var views = Set<UIView>()
 }
 
-extension UIView : _Reflectable {
-  /// Returns a mirror that reflects `self`.
-  public func _getMirror() -> _MirrorType {
-    return _UIViewMirror(self)
+extension UIView : CustomPlaygroundQuickLookable {
+  public func customPlaygroundQuickLook() -> PlaygroundQuickLook {
+    if _UIViewQuickLookState.views.contains(self) {
+      return .View(UIImage())
+    } else {
+      _UIViewQuickLookState.views.insert(self)
+      // in case of an empty rectangle abort the logging
+      if (bounds.size.width == 0) || (bounds.size.height == 0) {
+        return .View(UIImage())
+      }
+  
+      UIGraphicsBeginImageContextWithOptions(bounds.size, false, 0.0)
+      // UIKit is about to update this to be optional, so make it work
+      // with both older and newer SDKs. (In this context it should always
+      // be present.)
+      let ctx: CGContext! = UIGraphicsGetCurrentContext()
+      UIColor(white:1.0, alpha:0.0).set()
+      CGContextFillRect(ctx, bounds)
+      layer.renderInContext(ctx)
+
+      let image: UIImage! = UIGraphicsGetImageFromCurrentImageContext()
+  
+      UIGraphicsEndImageContext()
+  
+      _UIViewQuickLookState.views.remove(self)
+      return .View(image)
+    }
   }
 }
 #endif

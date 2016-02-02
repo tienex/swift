@@ -1,9 +1,16 @@
 import resilient_struct
 
 // Fixed-layout enum with resilient members
+@_fixed_layout public enum SimpleShape {
+  case KleinBottle
+  case Triangle(Size)
+}
+
+// Fixed-layout enum with resilient members
 @_fixed_layout public enum Shape {
+  case Point
   case Rect(Size)
-  case RoundedRect(Size)
+  case RoundedRect(Size, Size)
 }
 
 // Fixed-layout enum with indirect resilient members
@@ -12,22 +19,58 @@ import resilient_struct
   indirect case Trapezoid(Size)
 }
 
+// The enum payload has fixed layout inside this module, but
+// resilient layout outside. Make sure we emit the payload
+// size in the metadata.
+
+public struct Color {
+  public let r: Int, g: Int, b: Int
+
+  public init(r: Int, g: Int, b: Int) {
+    self.r = r
+    self.g = g
+    self.b = b
+  }
+}
+
+@_fixed_layout public enum CustomColor {
+  case Black
+  case White
+  case Custom(Color)
+  case Bespoke(Color, Color)
+}
+
 // Resilient enum
 public enum Medium {
-  // Empty cases
-  case Paper
-  case Canvas
-
   // Indirect case
-  indirect case Pamphlet(Medium)
+  indirect case Pamphlet(Medium)  // -1
 
   // Case with resilient payload
-  case Postcard(Size)
+  case Postcard(Size)             // -2
+
+  // Empty cases
+  case Paper                      // 0
+  case Canvas                     // 1
 }
 
 // Indirect resilient enum
 public indirect enum IndirectApproach {
-  case Angle(Double)
+  case Angle(Double)              // -1
+}
+
+// Resilient enum with resilient empty payload case
+public struct EmptyStruct {
+  public init() {}
+}
+
+public enum ResilientEnumWithEmptyCase {
+  case A                          // 0
+  case B                          // 1
+  case Empty(EmptyStruct)         // -1
+}
+
+public func getResilientEnumWithEmptyCase() -> [ResilientEnumWithEmptyCase] {
+  return [.A, .B, .Empty(EmptyStruct())]
 }
 
 // Specific enum implementations for executable tests
@@ -50,17 +93,17 @@ public enum ResilientNoPayloadEnum {
 }
 
 public enum ResilientSinglePayloadEnum {
-  case A
-  case B
-  case C
-  case X(AnyObject)
+  case X(AnyObject)               // -1
+  case A                          // 0
+  case B                          // 1
+  case C                          // 2
 }
 
 public enum ResilientSinglePayloadGenericEnum<T> {
-  case A
-  case B
-  case C
-  case X(T)
+  case X(T)                       // -1
+  case A                          // 0
+  case B                          // 1
+  case C                          // 2
 }
 
 public class ArtClass {
@@ -94,11 +137,11 @@ public func makeResilientMultiPayloadEnum(n: Int, i: Int)
 }
 
 public enum ResilientMultiPayloadEnumSpareBits {
-  case A
-  case B
-  case C
-  case X(ArtClass)
-  case Y(ArtClass)
+  case A                          // 0
+  case B                          // 1
+  case C                          // 2
+  case X(ArtClass)                // -1
+  case Y(ArtClass)                // -2
 }
 
 public func makeResilientMultiPayloadEnumSpareBits(o: ArtClass, i: Int)
@@ -135,15 +178,20 @@ public enum ResilientMultiPayloadEnumSpareBitsAndExtraBits {
 }
 
 public enum ResilientMultiPayloadGenericEnum<T> {
-  case A
-  case B
-  case C
-  case X(T)
-  case Y(T)
+  case A                          // 0
+  case B                          // 1
+  case C                          // 2
+  case X(T)                       // -1
+  case Y(T)                       // -2
 }
 
 public enum ResilientIndirectEnum {
+  // 0
   case Base
+
+  // -1
   indirect case A(ResilientIndirectEnum)
+
+  // -2
   indirect case B(ResilientIndirectEnum, ResilientIndirectEnum)
 }

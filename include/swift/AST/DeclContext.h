@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -66,6 +66,7 @@ enum class DeclContextKind : uint8_t {
   AbstractClosureExpr,
   Initializer,
   TopLevelCodeDecl,
+  SubscriptDecl,
   AbstractFunctionDecl,
   SerializedLocal,
   Last_LocalDeclContextKind = SerializedLocal,
@@ -245,7 +246,7 @@ public:
   /// ClassDecl, otherwise return null.
   ClassDecl *isClassOrClassExtensionContext() const;
 
-  /// If this DeclContext is a enum, or an extension on a enum, return the
+  /// If this DeclContext is an enum, or an extension on an enum, return the
   /// EnumDecl, otherwise return null.
   EnumDecl *isEnumOrEnumExtensionContext() const;
 
@@ -403,6 +404,12 @@ public:
   bool lookupQualified(Type type, DeclName member, unsigned options,
                        LazyResolver *typeResolver,
                        SmallVectorImpl<ValueDecl *> &decls) const;
+
+  /// Look up all Objective-C methods with the given selector visible
+  /// in the enclosing module.
+  void lookupAllObjCMethods(
+         ObjCSelector selector,
+         SmallVectorImpl<AbstractFunctionDecl *> &results) const;
 
   /// Return the ASTContext for a specified DeclContext by
   /// walking up to the enclosing module and returning its ASTContext.

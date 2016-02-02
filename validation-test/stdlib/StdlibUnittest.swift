@@ -70,6 +70,18 @@ XFailsAndSkips.test("fails") {
   expectEqual(1, 2)
 }
 
+// CHECK: [    XFAIL ] XFailsAndSkips.fails-always{{$}}
+XFailsAndSkips.test("fails-always")
+  .xfail(.Always("must always fail")).code {
+  expectEqual(1, 2)
+}
+
+// CHECK: [      OK ] XFailsAndSkips.fails-never{{$}}
+XFailsAndSkips.test("fails-never")
+  .xfail(.Never).code {
+  expectEqual(1, 1)
+}
+
 // CHECK: [    XFAIL ] XFailsAndSkips.xfail 10.9.3 passes{{$}}
 XFailsAndSkips.test("xfail 10.9.3 passes")
   .xfail(.OSXBugFix(10, 9, 3, reason: "")).code {
@@ -80,6 +92,18 @@ XFailsAndSkips.test("xfail 10.9.3 passes")
 XFailsAndSkips.test("xfail 10.9.3 fails")
   .xfail(.OSXBugFix(10, 9, 3, reason: "")).code {
   expectEqual(1, 2)
+}
+
+// CHECK: [     SKIP ] XFailsAndSkips.skipAlways (skip: [Always(reason: skip)]){{$}}
+XFailsAndSkips.test("skipAlways")
+  .skip(.Always("skip")).code {
+    fatalError("should not happen")
+}
+
+// CHECK: [       OK ] XFailsAndSkips.skipNever{{$}}
+XFailsAndSkips.test("skipNever")
+  .skip(.Never).code {
+    expectEqual(1, 1)
 }
 
 // CHECK: [     FAIL ] XFailsAndSkips.skip 10.9.2 passes{{$}}
@@ -338,7 +362,7 @@ AssertionsTestSuite.test("expectFailure/UXPass")
     return ()
   }
 }
-// CHECK: [ RUN      ] Assertions.expectFailure/UXPass (XFAIL: [Custom(reason: test)])
+// CHECK: [ RUN      ] Assertions.expectFailure/UXPass ({{X}}FAIL: [Custom(reason: test)])
 // CHECK-NEXT: out>>> check failed at {{.*}}/stdlib/StdlibUnittest.swift, line
 // CHECK: out>>> expected: 1 (of type Swift.Int)
 // CHECK: out>>> actual: 2 (of type Swift.Int)
@@ -362,7 +386,7 @@ AssertionsTestSuite.test("expectFailure/XFail")
     return ()
   }
 }
-// CHECK: [ RUN      ] Assertions.expectFailure/XFail (XFAIL: [Custom(reason: test)])
+// CHECK: [ RUN      ] Assertions.expectFailure/XFail ({{X}}FAIL: [Custom(reason: test)])
 // CHECK-NEXT: out>>> check failed at {{.*}}/stdlib/StdlibUnittest.swift, line
 // CHECK: out>>> expected: true
 // CHECK: out>>> running `body` should produce an expected failure
@@ -393,7 +417,7 @@ AssertionsTestSuite.test("expectFailure/AfterFailure/XFail")
     return ()
   }
 }
-// CHECK: [ RUN      ] Assertions.expectFailure/AfterFailure/XFail (XFAIL: [Custom(reason: test)])
+// CHECK: [ RUN      ] Assertions.expectFailure/AfterFailure/XFail ({{X}}FAIL: [Custom(reason: test)])
 // CHECK-NEXT: out>>> check failed at {{.*}}/stdlib/StdlibUnittest.swift, line
 // CHECK: out>>> expected: 1 (of type Swift.Int)
 // CHECK: out>>> actual: 2 (of type Swift.Int)
@@ -426,7 +450,7 @@ AssertionsTestSuite.test("expectCrashLater/UXPass")
   expectCrashLater()
   _blackHole(array[0])
 }
-// CHECK: [ RUN      ] Assertions.expectCrashLater/UXPass (XFAIL: [Custom(reason: test)])
+// CHECK: [ RUN      ] Assertions.expectCrashLater/UXPass ({{X}}FAIL: [Custom(reason: test)])
 // CHECK: err>>> CRASHED: SIG{{.*}}
 // CHECK: [   UXPASS ] Assertions.expectCrashLater/UXPass
 
@@ -442,7 +466,7 @@ AssertionsTestSuite.test("expectCrashLater/XFail")
   .code {
   expectCrashLater()
 }
-// CHECK: [ RUN      ] Assertions.expectCrashLater/XFail (XFAIL: [Custom(reason: test)])
+// CHECK: [ RUN      ] Assertions.expectCrashLater/XFail ({{X}}FAIL: [Custom(reason: test)])
 // CHECK: expecting a crash, but the test did not crash
 // CHECK: [    XFAIL ] Assertions.expectCrashLater/XFail
 

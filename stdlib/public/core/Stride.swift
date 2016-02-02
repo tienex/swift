@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -16,7 +16,7 @@ public protocol Strideable : Comparable {
   // FIXME: We'd like to name this type "Distance" but for
   // <rdar://problem/17619038>
   /// A type that can represent the distance between two values of `Self`.
-  typealias Stride : SignedNumberType
+  associatedtype Stride : SignedNumberType
 
   /// Returns a stride `x` such that `self.advancedBy(x)` approximates
   /// `other`.
@@ -135,14 +135,14 @@ public struct StrideToGenerator<Element : Strideable> : GeneratorType {
     if stride > 0 ? current >= end : current <= end {
       return nil
     }
-    let ret = current
+    let result = current
     current += stride
-    return ret
+    return result
   }
 }
 
 /// A `SequenceType` of values formed by striding over a half-open interval.
-public struct StrideTo<Element : Strideable> : SequenceType {
+public struct StrideTo<Element : Strideable> : SequenceType, CustomReflectable {
   // FIXME: should really be a CollectionType, as it is multipass
 
   @available(*, unavailable, renamed="Element")
@@ -167,6 +167,10 @@ public struct StrideTo<Element : Strideable> : SequenceType {
   let start: Element
   let end: Element
   let stride: Element.Stride
+
+  public func customMirror() -> Mirror {
+    return Mirror(self, children: ["from": start, "to": end, "by": stride])
+  }
 }
 
 extension Strideable {
@@ -209,14 +213,14 @@ public struct StrideThroughGenerator<Element : Strideable> : GeneratorType {
       }
       return nil
     }
-    let ret = current
+    let result = current
     current += stride
-    return ret
+    return result
   }
 }
 
 /// A `SequenceType` of values formed by striding over a closed interval.
-public struct StrideThrough<Element : Strideable> : SequenceType {
+public struct StrideThrough<Element : Strideable> : SequenceType, CustomReflectable {
   // FIXME: should really be a CollectionType, as it is multipass
 
   @available(*, unavailable, renamed="Element")
@@ -240,6 +244,10 @@ public struct StrideThrough<Element : Strideable> : SequenceType {
   let start: Element
   let end: Element
   let stride: Element.Stride
+
+  public func customMirror() -> Mirror {
+    return Mirror(self, children: ["from": start, "through": end, "by": stride])
+  }
 }
 
 extension Strideable {

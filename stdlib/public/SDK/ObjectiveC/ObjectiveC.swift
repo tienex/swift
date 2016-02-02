@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -60,10 +60,10 @@ public struct ObjCBool : BooleanType, BooleanLiteralConvertible {
   }
 }
 
-extension ObjCBool : _Reflectable {
+extension ObjCBool : CustomReflectable {
   /// Returns a mirror that reflects `self`.
-  public func _getMirror() -> _MirrorType {
-    return _reflect(boolValue)
+  public func customMirror() -> Mirror {
+    return Mirror(reflecting: boolValue)
   }
 }
 
@@ -167,10 +167,10 @@ extension String {
   }
 }
 
-extension Selector : _Reflectable {
+extension Selector : CustomReflectable {
   /// Returns a mirror that reflects `self`.
-  public func _getMirror() -> _MirrorType {
-    return _reflect(String(_sel: self))
+  public func customMirror() -> Mirror {
+    return Mirror(reflecting: String(_sel: self))
   }
 }
 
@@ -189,6 +189,9 @@ public struct NSZone : NilLiteralConvertible {
     pointer = nil
   }
 }
+
+// Note: NSZone becomes Zone in Swift 3.
+typealias Zone = NSZone
 
 //===----------------------------------------------------------------------===//
 // FIXME: @autoreleasepool substitute

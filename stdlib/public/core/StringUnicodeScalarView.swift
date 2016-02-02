@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -29,8 +29,7 @@ public func <(
 extension String {
   /// A collection of [Unicode scalar values](http://www.unicode.org/glossary/#unicode_scalar_value) that
   /// encode a `String` .
-  public struct UnicodeScalarView : CollectionType, _Reflectable,
-    CustomStringConvertible, CustomDebugStringConvertible {
+  public struct UnicodeScalarView : CollectionType, CustomStringConvertible, CustomDebugStringConvertible {
     init(_ _core: _StringCore) {
       self._core = _core
     }
@@ -46,7 +45,8 @@ extension String {
         if idx == core.endIndex {
           return nil
         }
-        return self.core[idx++]
+        defer { idx += 1 }
+        return self.core[idx]
       }
     }
 
@@ -73,8 +73,8 @@ extension String {
       /// - Requires: The previous value is representable.
       @warn_unused_result
       public func predecessor() -> Index {
-        var i = _position
-        let codeUnit = _core[--i]
+        var i = _position-1
+        let codeUnit = _core[i]
         if _slowPath((codeUnit >> 10) == 0b1101_11) {
           if i != 0 && (_core[i - 1] >> 10) == 0b1101_10 {
             i -= 1
@@ -123,7 +123,7 @@ extension String {
       case .Result(let us):
         return us
       case .EmptyInput:
-        _sanityCheckFailure("can not subscript using an endIndex")
+        _sanityCheckFailure("cannot subscript using an endIndex")
       case .Error:
         return UnicodeScalar(0xfffd)
       }
@@ -208,12 +208,6 @@ extension String {
     @warn_unused_result
     public func generate() -> Generator {
       return Generator(_core)
-    }
-
-    /// Returns a mirror that reflects `self`.
-    @warn_unused_result
-    public func _getMirror() -> _MirrorType {
-      return _UnicodeScalarViewMirror(self)
     }
 
     public var description: String {
@@ -410,5 +404,20 @@ extension String.UnicodeScalarIndex {
       scalars[self].value)
 
     return segmenter.isBoundary(gcb0, gcb1)
+  }
+}
+
+// Reflection
+extension String.UnicodeScalarView : CustomReflectable {
+  /// Returns a mirror that reflects `self`.
+  @warn_unused_result
+  public func customMirror() -> Mirror {
+    return Mirror(self, unlabeledChildren: self)
+  }
+}
+
+extension String.UnicodeScalarView : CustomPlaygroundQuickLookable {
+  public func customPlaygroundQuickLook() -> PlaygroundQuickLook {
+    return .Text(description)
   }
 }

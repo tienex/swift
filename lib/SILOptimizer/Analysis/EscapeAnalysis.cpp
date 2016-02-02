@@ -1,8 +1,8 @@
-//===-------------- EscapeAnalysis.cpp - SIL Escape Analysis --------------===//
+//===--- EscapeAnalysis.cpp - SIL Escape Analysis -------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -65,7 +65,7 @@ static ValueBase *skipProjections(ValueBase *V) {
   for (;;) {
     if (!isProjection(V))
       return V;
-    V = cast<SILInstruction>(V)->getOperand(0).getDef();
+    V = cast<SILInstruction>(V)->getOperand(0);
   }
   llvm_unreachable("there is no escape from an infinite loop");
 }
@@ -80,13 +80,28 @@ void EscapeAnalysis::ConnectionGraph::clear() {
 }
 
 EscapeAnalysis::CGNode *EscapeAnalysis::ConnectionGraph::
-getOrCreateNode(ValueBase *V) {
+getNode(ValueBase *V, EscapeAnalysis *EA, bool createIfNeeded) {
+  if (isa<FunctionRefInst>(V))
+    return nullptr;
+  
+  if (!V->hasValue())
+    return nullptr;
+  
+  if (!EA->isPointer(V))
+    return nullptr;
+  
+  V = skipProjections(V);
+
+  if (!createIfNeeded)
+    return lookupNode(V);
+  
   CGNode * &Node = Values2Nodes[V];
   if (!Node) {
     if (SILArgument *Arg = dyn_cast<SILArgument>(V)) {
       if (Arg->isFunctionArg()) {
         Node = allocNode(V, NodeType::Argument);
-        Node->mergeEscapeState(EscapeState::Arguments);
+        if (!isSummaryGraph)
+          Node->mergeEscapeState(EscapeState::Arguments);
       } else {
         Node = allocNode(V, NodeType::Value);
       }
@@ -99,7 +114,7 @@ getOrCreateNode(ValueBase *V) {
 
 EscapeAnalysis::CGNode *EscapeAnalysis::ConnectionGraph::getContentNode(
                                                           CGNode *AddrNode) {
-  // Do we already have a content node (which is not necessarliy an immediate
+  // Do we already have a content node (which is not necessarily an immediate
   // successor of AddrNode)?
   if (AddrNode->pointsTo)
     return AddrNode->pointsTo;
@@ -112,7 +127,7 @@ EscapeAnalysis::CGNode *EscapeAnalysis::ConnectionGraph::getContentNode(
 }
 
 bool EscapeAnalysis::ConnectionGraph::addDeferEdge(CGNode *From, CGNode *To) {
-  if (!From->addDefered(To))
+  if (!From->addDeferred(To))
     return false;
 
   CGNode *FromPointsTo = From->pointsTo;
@@ -135,8 +150,8 @@ bool EscapeAnalysis::ConnectionGraph::addDeferEdge(CGNode *From, CGNode *To) {
 void EscapeAnalysis::ConnectionGraph::mergeAllScheduledNodes() {
   while (!ToMerge.empty()) {
     CGNode *From = ToMerge.pop_back_val();
-    CGNode *To = From->mergeTo;
-    assert(To && "Node scheduled to merge but no merge target set");
+    CGNode *To = From->getMergeTarget();
+    assert(To != From && "Node scheduled to merge but no merge target set");
     assert(!From->isMerged && "Merge source is already merged");
     assert(From->Type == NodeType::Content && "Can only merge content nodes");
     assert(To->Type == NodeType::Content && "Can only merge content nodes");
@@ -153,7 +168,7 @@ void EscapeAnalysis::ConnectionGraph::mergeAllScheduledNodes() {
           PredNode->setPointsTo(To);
       } else {
         assert(PredNode != From);
-        auto Iter = PredNode->findDefered(From);
+        auto Iter = PredNode->findDeferred(From);
         assert(Iter != PredNode->defersTo.end() &&
                "Incoming defer-edge not found in predecessor's defer list");
         PredNode->defersTo.erase(Iter);
@@ -180,9 +195,11 @@ void EscapeAnalysis::ConnectionGraph::mergeAllScheduledNodes() {
       Defers->removeFromPreds(Predecessor(From, EdgeType::Defer));
     }
     // Redirect the incoming defer edges. This may trigger other node merges.
-    for (Predecessor Pred : From->Preds) {
-      CGNode *PredNode = Pred.getPointer();
-      if (Pred.getInt() == EdgeType::Defer) {
+    // Note that the Pred iterator may be invalidated (because we may add
+    // edges in the loop). So we don't do: for (Pred : From->Preds) {...}
+    for (unsigned PredIdx = 0; PredIdx < From->Preds.size(); ++PredIdx) {
+      CGNode *PredNode = From->Preds[PredIdx].getPointer();
+      if (From->Preds[PredIdx].getInt() == EdgeType::Defer) {
         assert(PredNode != From && "defer edge may not form a self-cycle");
         addDeferEdge(PredNode, To);
       }
@@ -192,29 +209,36 @@ void EscapeAnalysis::ConnectionGraph::mergeAllScheduledNodes() {
     for (CGNode *Defers : From->defersTo) {
       addDeferEdge(To, Defers);
     }
-
-    // Ensure that graph invariance 4) is kept. At this point there may be still
-    // some violations because of the new adjacent edges of the To node.
-    for (Predecessor Pred : To->Preds) {
-      if (Pred.getInt() == EdgeType::PointsTo) {
-        CGNode *PredNode = Pred.getPointer();
-        for (Predecessor PredOfPred : PredNode->Preds) {
-          if (PredOfPred.getInt() == EdgeType::Defer)
-            updatePointsTo(PredOfPred.getPointer(), To);
+    // There is no point in updating the pointsTo if the To node will be
+    // merged to another node eventually.
+    if (!To->mergeTo) {
+      // Ensure that graph invariance 4) is kept. At this point there may be still
+      // some violations because of the new adjacent edges of the To node.
+      for (unsigned PredIdx = 0; PredIdx < To->Preds.size(); ++PredIdx) {
+        if (To->Preds[PredIdx].getInt() == EdgeType::PointsTo) {
+          CGNode *PredNode = To->Preds[PredIdx].getPointer();
+          for (unsigned PPIdx = 0; PPIdx < PredNode->Preds.size(); ++PPIdx) {
+            if (PredNode->Preds[PPIdx].getInt() == EdgeType::Defer)
+              updatePointsTo(PredNode->Preds[PPIdx].getPointer(), To);
+          }
+          for (CGNode *Def : PredNode->defersTo) {
+            updatePointsTo(Def, To);
+          }
         }
       }
-    }
-    if (CGNode *ToPT = To->getPointsToEdge()) {
-      for (CGNode *ToDef : To->defersTo) {
-        updatePointsTo(ToDef, ToPT);
+      if (CGNode *ToPT = To->getPointsToEdge()) {
+        ToPT = ToPT->getMergeTarget();
+        for (CGNode *ToDef : To->defersTo) {
+          updatePointsTo(ToDef, ToPT);
+          assert(!ToPT->mergeTo);
+        }
+        for (unsigned PredIdx = 0; PredIdx < To->Preds.size(); ++PredIdx) {
+          if (To->Preds[PredIdx].getInt() == EdgeType::Defer)
+            updatePointsTo(To->Preds[PredIdx].getPointer(), ToPT);
+        }
       }
-      for (Predecessor Pred : To->Preds) {
-        if (Pred.getInt() == EdgeType::Defer)
-          updatePointsTo(Pred.getPointer(), ToPT);
-      }
+      To->mergeEscapeState(From->State);
     }
-    To->mergeEscapeState(From->State);
-
     // Cleanup the merged node.
     From->isMerged = true;
     From->Preds.clear();
@@ -226,9 +250,11 @@ void EscapeAnalysis::ConnectionGraph::mergeAllScheduledNodes() {
 void EscapeAnalysis::ConnectionGraph::
 updatePointsTo(CGNode *InitialNode, CGNode *pointsTo) {
   // Visit all nodes in the defer web, which don't have the right pointsTo set.
+  assert(!pointsTo->mergeTo);
   llvm::SmallVector<CGNode *, 8> WorkList;
   WorkList.push_back(InitialNode);
   InitialNode->isInWorkList = true;
+  bool isInitialSet = false;
   for (unsigned Idx = 0; Idx < WorkList.size(); ++Idx) {
     auto *Node = WorkList[Idx];
     if (Node->pointsTo == pointsTo)
@@ -237,6 +263,8 @@ updatePointsTo(CGNode *InitialNode, CGNode *pointsTo) {
     if (Node->pointsTo) {
       // Mismatching: we need to merge!
       scheduleToMerge(Node->pointsTo, pointsTo);
+    } else {
+      isInitialSet = true;
     }
 
     // If the node already has a pointsTo _edge_ we don't change it (we don't
@@ -253,10 +281,10 @@ updatePointsTo(CGNode *InitialNode, CGNode *pointsTo) {
     }
 
     // Add all adjacent nodes to the WorkList.
-    for (auto *Defered : Node->defersTo) {
-      if (!Defered->isInWorkList) {
-        WorkList.push_back(Defered);
-        Defered->isInWorkList = true;
+    for (auto *Deferred : Node->defersTo) {
+      if (!Deferred->isInWorkList) {
+        WorkList.push_back(Deferred);
+        Deferred->isInWorkList = true;
       }
     }
     for (Predecessor Pred : Node->Preds) {
@@ -265,6 +293,60 @@ updatePointsTo(CGNode *InitialNode, CGNode *pointsTo) {
         if (!PredNode->isInWorkList) {
           WorkList.push_back(PredNode);
           PredNode->isInWorkList = true;
+        }
+      }
+    }
+  }
+  if (isInitialSet) {
+    // Here we handle a special case: all defer-edge paths must eventually end
+    // in a points-to edge to pointsTo. We ensure this by setting the edge on
+    // nodes which have no defer-successors (see above). But this does not cover
+    // the case where there is a terminating cycle in the defer-edge path,
+    // e.g.  A -> B -> C -> B
+    // We find all nodes which don't reach a points-to edge and add additional
+    // points-to edges to fix that.
+    llvm::SmallVector<CGNode *, 8> PotentiallyInCycles;
+
+    // Keep all nodes with a points-to edge in the WorkList and remove all other
+    // nodes.
+    unsigned InsertionPoint = 0;
+    for (CGNode *Node : WorkList) {
+      if (Node->pointsToIsEdge) {
+        WorkList[InsertionPoint++] = Node;
+      } else {
+        Node->isInWorkList = false;
+        PotentiallyInCycles.push_back(Node);
+      }
+    }
+    WorkList.set_size(InsertionPoint);
+    unsigned Idx = 0;
+    while (!PotentiallyInCycles.empty()) {
+
+      // Propagate the "reaches-a-points-to-edge" backwards in the defer-edge
+      // sub-graph by adding those nodes to the WorkList.
+      while (Idx < WorkList.size()) {
+        auto *Node = WorkList[Idx++];
+        for (Predecessor Pred : Node->Preds) {
+          if (Pred.getInt() == EdgeType::Defer) {
+            CGNode *PredNode = Pred.getPointer();
+            if (!PredNode->isInWorkList) {
+              WorkList.push_back(PredNode);
+              PredNode->isInWorkList = true;
+            }
+          }
+        }
+      }
+      // Check if we still have some nodes which don't reach a points-to edge,
+      // i.e. points not yet in the WorkList.
+      while (!PotentiallyInCycles.empty()) {
+        auto *Node = PotentiallyInCycles.pop_back_val();
+        if (!Node->isInWorkList) {
+          // We create a points-to edge for the first node which doesn't reach
+          // a points-to edge yet.
+          Node->setPointsTo(pointsTo);
+          WorkList.push_back(Node);
+          Node->isInWorkList = true;
+          break;
         }
       }
     }
@@ -296,7 +378,7 @@ void EscapeAnalysis::ConnectionGraph::computeUsePoints() {
       /// In addition to releasing instructions (see below) we also add block
       /// arguments as use points. In case of loops, block arguments can
       /// "extend" the liferange of a reference in upward direction.
-      if (CGNode *ArgNode = getNodeOrNull(BBArg)) {
+      if (CGNode *ArgNode = lookupNode(BBArg)) {
         addUsePoint(ArgNode, BBArg);
       }
     }
@@ -310,11 +392,11 @@ void EscapeAnalysis::ConnectionGraph::computeUsePoints() {
         case ValueKind::TryApplyInst: {
           /// Actually we only add instructions which may release a reference.
           /// We need the use points only for getting the end of a reference's
-          /// liferange. And that must be a releaseing instruction.
+          /// liferange. And that must be a releasing instruction.
           int ValueIdx = -1;
           for (const Operand &Op : I.getAllOperands()) {
-            ValueBase *OpV = Op.get().getDef();
-            if (CGNode *OpNd = getNodeOrNull(skipProjections(OpV))) {
+            ValueBase *OpV = Op.get();
+            if (CGNode *OpNd = lookupNode(skipProjections(OpV))) {
               if (ValueIdx < 0) {
                 ValueIdx = addUsePoint(OpNd, &I);
               } else {
@@ -425,10 +507,10 @@ bool EscapeAnalysis::ConnectionGraph::mergeFrom(ConnectionGraph *SourceGraph,
         DestFrom = DestFrom->getMergeTarget();
       }
 
-      for (auto *Defered : SourceReachable->defersTo) {
-        if (!Defered->isInWorkList) {
-          WorkList.push_back(Defered);
-          Defered->isInWorkList = true;
+      for (auto *Deferred : SourceReachable->defersTo) {
+        if (!Deferred->isInWorkList) {
+          WorkList.push_back(Deferred);
+          Deferred->isInWorkList = true;
         }
       }
     }
@@ -436,22 +518,6 @@ bool EscapeAnalysis::ConnectionGraph::mergeFrom(ConnectionGraph *SourceGraph,
     WorkList.clear();
   }
   return Changed;
-}
-
-EscapeAnalysis::CGNode *EscapeAnalysis::ConnectionGraph::
-getNode(ValueBase *V, EscapeAnalysis *EA) {
-  if (isa<FunctionRefInst>(V))
-    return nullptr;
-
-  if (!V->hasValue())
-    return nullptr;
-
-  if (!EA->isPointer(V))
-    return nullptr;
-
-  V = skipProjections(V);
-
-  return getOrCreateNode(V);
 }
 
 /// Returns true if \p V is a use of \p Node, i.e. V may (indirectly)
@@ -470,7 +536,7 @@ bool EscapeAnalysis::ConnectionGraph::isUsePoint(ValueBase *V, CGNode *Node) {
   return Node->UsePoints.test(Idx);
 }
 
-bool EscapeAnalysis::ConnectionGraph::canEscapeTo(CGNode *From, CGNode *To) {
+bool EscapeAnalysis::ConnectionGraph::isReachable(CGNode *From, CGNode *To) {
   // See if we can reach the From-node by transitively visiting the
   // predecessor nodes of the To-node.
   // Usually nodes have few predecessor nodes and the graph depth is small.
@@ -507,7 +573,7 @@ struct CGForDotView {
 
   enum EdgeTypes {
     PointsTo,
-    Defered
+    Deferred
   };
 
   struct Node {
@@ -564,7 +630,7 @@ CGForDotView::CGForDotView(const EscapeAnalysis::ConnectionGraph *CG) :
     }
     for (auto *Def : OrigNode->defersTo) {
       Nd.Children.push_back(Orig2Node[Def]);
-      Nd.ChildrenTypes.push_back(Defered);
+      Nd.ChildrenTypes.push_back(Deferred);
     }
   }
 }
@@ -585,7 +651,7 @@ std::string CGForDotView::getNodeLabel(const Node *Node) const {
     default: {
       std::string Inst;
       llvm::raw_string_ostream OI(Inst);
-      SILValue(Node->OrigNode->V).print(OI);
+      SILValue(Node->OrigNode->V)->print(OI);
       size_t start = Inst.find(" = ");
       if (start != std::string::npos) {
         start += 3;
@@ -702,7 +768,7 @@ namespace llvm {
       unsigned ChildIdx = I - Node->Children.begin();
       switch (Node->ChildrenTypes[ChildIdx]) {
         case CGForDotView::PointsTo: return "";
-        case CGForDotView::Defered: return "color=\"gray\"";
+        case CGForDotView::Deferred: return "color=\"gray\"";
       }
     }
   };
@@ -865,7 +931,7 @@ void EscapeAnalysis::ConnectionGraph::verifyStructure() const {
     for (Predecessor Pred : Nd->Preds) {
       CGNode *PredNode = Pred.getPointer();
       if (Pred.getInt() == EdgeType::Defer) {
-        assert(PredNode->findDefered(Nd) != PredNode->defersTo.end());
+        assert(PredNode->findDeferred(Nd) != PredNode->defersTo.end());
       } else {
         assert(Pred.getInt() == EdgeType::PointsTo);
         assert(PredNode->getPointsToEdge() == Nd);
@@ -948,13 +1014,12 @@ static bool isOrContainsReference(SILType Ty, SILModule *Mod) {
 
 bool EscapeAnalysis::isPointer(ValueBase *V) {
   assert(V->hasValue());
-  SILType Ty = V->getType(0);
+  SILType Ty = V->getType();
   auto Iter = isPointerCache.find(Ty);
   if (Iter != isPointerCache.end())
     return Iter->second;
 
-  bool IP = (Ty.isAddress() || Ty.isLocalStorage() ||
-             isOrContainsReference(Ty, M));
+  bool IP = (Ty.isAddress() || isOrContainsReference(Ty, M));
   isPointerCache[Ty] = IP;
   return IP;
 }
@@ -1059,7 +1124,7 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
         return;
       case ArrayCallKind::kGetElement:
         // This is like a load from a ref_element_addr.
-        if (FAS.getArgument(0).getType().isAddress()) {
+        if (FAS.getArgument(0)->getType().isAddress()) {
           if (CGNode *AddrNode = ConGraph->getNode(ASC.getSelf(), this)) {
             if (CGNode *DestNode = ConGraph->getNode(FAS.getArgument(0), this)) {
               // One content node for going from the array buffer pointer to
@@ -1121,6 +1186,9 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
     case ValueKind::AllocStackInst:
     case ValueKind::AllocRefInst:
     case ValueKind::AllocBoxInst:
+      ConGraph->getNode(I, this);
+      return;
+
     case ValueKind::DeallocStackInst:
     case ValueKind::StrongRetainInst:
     case ValueKind::StrongRetainUnownedInst:
@@ -1139,6 +1207,7 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
       return;
     case ValueKind::StrongReleaseInst:
     case ValueKind::ReleaseValueInst:
+    case ValueKind::StrongUnpinInst:
     case ValueKind::UnownedReleaseInst: {
       SILValue OpV = I->getOperand(0);
       if (CGNode *AddrNode = ConGraph->getNode(OpV, this)) {
@@ -1148,7 +1217,7 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
         // deallocation).
         CGNode *CapturedByDeinit = ConGraph->getContentNode(AddrNode);
         CapturedByDeinit = ConGraph->getContentNode(CapturedByDeinit);
-        if (isArrayOrArrayStorage(OpV)) {
+        if (deinitIsKnownToNotCapture(OpV)) {
           CapturedByDeinit = ConGraph->getContentNode(CapturedByDeinit);
         }
         ConGraph->setEscapesGlobal(CapturedByDeinit);
@@ -1246,6 +1315,7 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
     case ValueKind::BridgeObjectToRefInst:
     case ValueKind::UncheckedAddrCastInst:
     case ValueKind::UnconditionalCheckedCastInst:
+    case ValueKind::StrongPinInst:
       // A cast is almost like a projection.
       if (CGNode *OpNode = ConGraph->getNode(I->getOperand(0), this)) {
         ConGraph->setNode(I, OpNode);
@@ -1282,26 +1352,43 @@ analyzeSelectInst(SelectInst *SI, ConnectionGraph *ConGraph) {
       SILValue CaseVal = SI->getCase(Idx).second;
       auto *ArgNode = ConGraph->getNode(CaseVal, this);
       assert(ArgNode &&
-             "there should be an argument node if there is an result node");
+             "there should be an argument node if there is a result node");
       ConGraph->defer(ResultNode, ArgNode);
     }
     // ... also including the default value.
     auto *DefaultNode = ConGraph->getNode(SI->getDefaultResult(), this);
     assert(DefaultNode &&
-           "there should be an argument node if there is an result node");
+           "there should be an argument node if there is a result node");
     ConGraph->defer(ResultNode, DefaultNode);
   }
 }
 
-bool EscapeAnalysis::isArrayOrArrayStorage(SILValue V) {
+bool EscapeAnalysis::deinitIsKnownToNotCapture(SILValue V) {
   for (;;) {
-    if (V.getType().getNominalOrBoundGenericNominal() == ArrayType)
+    // The deinit of an array buffer does not capture the array elements.
+    if (V->getType().getNominalOrBoundGenericNominal() == ArrayType)
       return true;
 
-    if (!isProjection(V.getDef()))
-      return false;
+    // The deinit of a box does not capture its content.
+    if (V->getType().is<SILBoxType>())
+      return true;
 
-    V = dyn_cast<SILInstruction>(V.getDef())->getOperand(0);
+    if (isa<FunctionRefInst>(V))
+      return true;
+
+    // Check all operands of a partial_apply
+    if (auto *PAI = dyn_cast<PartialApplyInst>(V)) {
+      for (Operand &Op : PAI->getAllOperands()) {
+        if (isPointer(Op.get()) && !deinitIsKnownToNotCapture(Op.get()))
+          return false;
+      }
+      return true;
+    }
+    if (isProjection(V)) {
+      V = dyn_cast<SILInstruction>(V)->getOperand(0);
+      continue;
+    }
+    return false;
   }
 }
 
@@ -1317,7 +1404,7 @@ void EscapeAnalysis::setAllEscaping(SILInstruction *I,
   // In this case we don't even create a node for the resulting int value.
   for (const Operand &Op : I->getAllOperands()) {
     SILValue OpVal = Op.get();
-    if (!isNonWritableMemoryAddress(OpVal.getDef()))
+    if (!isNonWritableMemoryAddress(OpVal))
       setEscapesGlobal(ConGraph, OpVal);
   }
   // Even if the instruction does not write memory it could e.g. return the
@@ -1429,13 +1516,22 @@ bool EscapeAnalysis::mergeCalleeGraph(FullApplySite FAS,
     // If there are more callee parameters than arguments it means that the
     // callee is the result of a partial_apply - a thick function. A thick
     // function also references the boxed partially applied arguments.
-    // Therefore we map all the extra callee paramters to the callee operand
+    // Therefore we map all the extra callee parameters to the callee operand
     // of the apply site.
     SILValue CallerArg = (Idx < numCallerArgs ? FAS.getArgument(Idx) :
                           FAS.getCallee());
-    if (CGNode *CalleeNd = CalleeGraph->getNode(Callee->getArgument(Idx), this)) {
-      Callee2CallerMapping.add(CalleeNd, CallerGraph->getNode(CallerArg, this));
-    }
+    CGNode *CalleeNd = CalleeGraph->getNode(Callee->getArgument(Idx), this);
+    if (!CalleeNd)
+      continue;
+
+    CGNode *CallerNd = CallerGraph->getNode(CallerArg, this);
+    // There can be the case that we see a callee argument as pointer but not
+    // the caller argument. E.g. if the callee argument has a @convention(c)
+    // function type and the caller passes a function_ref.
+    if (!CallerNd)
+      continue;
+
+    Callee2CallerMapping.add(CalleeNd, CallerNd);
   }
 
   // Map the return value.
@@ -1469,45 +1565,191 @@ bool EscapeAnalysis::mergeSummaryGraph(ConnectionGraph *SummaryGraph,
   return SummaryGraph->mergeFrom(Graph, Mapping);
 }
 
-
 bool EscapeAnalysis::canEscapeToUsePoint(SILValue V, ValueBase *UsePoint,
                                          ConnectionGraph *ConGraph) {
-  CGNode *Node = ConGraph->getNode(V, this);
-  if (!Node)
-    return false;
 
-  // First check if there are escape pathes which we don't explicitly see
+  assert((FullApplySite::isa(UsePoint) || isa<RefCountingInst>(UsePoint)) &&
+         "use points are only created for calls and refcount instructions");
+
+  CGNode *Node = ConGraph->getNodeOrNull(V, this);
+  if (!Node)
+    return true;
+
+  // First check if there are escape paths which we don't explicitly see
   // in the graph.
-  switch (Node->getEscapeState()) {
-    case EscapeState::None:
-    case EscapeState::Return:
-      break;
-    case EscapeState::Arguments:
-      if (!isNotAliasingArgument(V))
-        return true;
-      break;
-    case EscapeState::Global:
-      return true;
-  }
+  if (Node->escapesInsideFunction(isNotAliasingArgument(V)))
+    return true;
+
   // No hidden escapes: check if the Node is reachable from the UsePoint.
   return ConGraph->isUsePoint(UsePoint, Node);
 }
 
-bool EscapeAnalysis::canPointToSameMemory(SILValue V1, SILValue V2,
-                                          ConnectionGraph *ConGraph) {
-  CGNode *Node1 = ConGraph->getNode(V1, this);
-  assert(Node1 && "value is not a pointer");
-  CGNode *Node2 = ConGraph->getNode(V2, this);
-  assert(Node2 && "value is not a pointer");
+bool EscapeAnalysis::canEscapeTo(SILValue V, FullApplySite FAS) {
+  // If it's not a local object we don't know anything about the value.
+  if (!pointsToLocalObject(V))
+    return true;
+  auto *ConGraph = getConnectionGraph(FAS.getFunction());
+  return canEscapeToUsePoint(V, FAS.getInstruction(), ConGraph);
+}
 
-  // If both nodes escape, the relation of the nodes may not be explicitly
-  // represented in the graph.
-  if (Node1->escapesInsideFunction() && Node2->escapesInsideFunction())
+static bool hasReferenceSemantics(SILType T) {
+  // Exclude address types.
+  return T.isObject() && T.hasReferenceSemantics();
+}
+
+bool EscapeAnalysis::canObjectOrContentEscapeTo(SILValue V, FullApplySite FAS) {
+  // If it's not a local object we don't know anything about the value.
+  if (!pointsToLocalObject(V))
     return true;
 
+  auto *ConGraph = getConnectionGraph(FAS.getFunction());
+  CGNode *Node = ConGraph->getNodeOrNull(V, this);
+  if (!Node)
+    return true;
+
+  // First check if there are escape paths which we don't explicitly see
+  // in the graph.
+  if (Node->escapesInsideFunction(isNotAliasingArgument(V)))
+    return true;
+
+  // Check if the object itself can escape to the called function.
+  SILInstruction *UsePoint = FAS.getInstruction();
+  if (ConGraph->isUsePoint(UsePoint, Node))
+    return true;
+
+  if (hasReferenceSemantics(V->getType())) {
+    // Check if the object "content", i.e. a pointer to one of its stored
+    // properties, can escape to the called function.
+    CGNode *ContentNode = ConGraph->getContentNode(Node);
+    if (ContentNode->escapesInsideFunction(false))
+      return true;
+
+    if (ConGraph->isUsePoint(UsePoint, ContentNode))
+      return true;
+  }
+  return false;
+}
+
+bool EscapeAnalysis::canEscapeTo(SILValue V, RefCountingInst *RI) {
+  // If it's not a local object we don't know anything about the value.
+  if (!pointsToLocalObject(V))
+    return true;
+  auto *ConGraph = getConnectionGraph(RI->getFunction());
+  return canEscapeToUsePoint(V, RI, ConGraph);
+}
+
+/// Utility to get the function which contains both values \p V1 and \p V2.
+static SILFunction *getCommonFunction(SILValue V1, SILValue V2) {
+  SILBasicBlock *BB1 = V1->getParentBB();
+  SILBasicBlock *BB2 = V2->getParentBB();
+  if (!BB1 || !BB2)
+    return nullptr;
+
+  SILFunction *F = BB1->getParent();
+  assert(BB2->getParent() == F && "values not in same function");
+  return F;
+}
+
+bool EscapeAnalysis::canEscapeToValue(SILValue V, SILValue To) {
+  if (!pointsToLocalObject(V))
+    return true;
+
+  SILFunction *F = getCommonFunction(V, To);
+  if (!F)
+    return true;
+  auto *ConGraph = getConnectionGraph(F);
+
+  CGNode *Node = ConGraph->getNodeOrNull(V, this);
+  if (!Node)
+    return true;
+  CGNode *ToNode = ConGraph->getNodeOrNull(To, this);
+  if (!ToNode)
+    return true;
+  return ConGraph->isReachable(Node, ToNode);
+}
+
+bool EscapeAnalysis::canPointToSameMemory(SILValue V1, SILValue V2) {
+  // At least one of the values must be a non-escaping local object.
+  bool isLocal1 = pointsToLocalObject(V1);
+  bool isLocal2 = pointsToLocalObject(V2);
+  if (!isLocal1 && !isLocal2)
+    return true;
+
+  SILFunction *F = getCommonFunction(V1, V2);
+  if (!F)
+    return true;
+  auto *ConGraph = getConnectionGraph(F);
+
+  CGNode *Node1 = ConGraph->getNodeOrNull(V1, this);
+  if (!Node1)
+    return true;
+  CGNode *Node2 = ConGraph->getNodeOrNull(V2, this);
+  if (!Node2)
+    return true;
+
+  // Finish the check for one value being a non-escaping local object.
+  if (isLocal1 && Node1->escapesInsideFunction(isNotAliasingArgument(V1)))
+    isLocal1 = false;
+
+  if (isLocal2 && Node2->escapesInsideFunction(isNotAliasingArgument(V2)))
+    isLocal2 = false;
+
+  if (!isLocal1 && !isLocal2)
+    return true;
+
+  // Check if both nodes may point to the same content.
   CGNode *Content1 = ConGraph->getContentNode(Node1);
   CGNode *Content2 = ConGraph->getContentNode(Node2);
-  return Content1 == Content2;
+
+  SILType T1 = V1->getType();
+  SILType T2 = V2->getType();
+  if (T1.isAddress() && T2.isAddress()) {
+    return Content1 == Content2;
+  }
+  if (hasReferenceSemantics(T1) && hasReferenceSemantics(T2)) {
+    return Content1 == Content2;
+  }
+  // As we model the ref_element_addr instruction as a content-relationship, we
+  // have to go down one content level if just one of the values is a
+  // ref-counted object.
+  if (T1.isAddress() && hasReferenceSemantics(T2)) {
+    Content2 = ConGraph->getContentNode(Content2);
+    return Content1 == Content2;
+  }
+  if (T2.isAddress() && hasReferenceSemantics(T1)) {
+    Content1 = ConGraph->getContentNode(Content1);
+    return Content1 == Content2;
+  }
+  return true;
+}
+
+bool EscapeAnalysis::canParameterEscape(FullApplySite FAS, int ParamIdx,
+                                        bool checkContentOfIndirectParam) {
+  CalleeList Callees = BCA->getCalleeList(FAS);
+  if (!Callees.allCalleesVisible())
+    return true;
+
+  // Derive the connection graph of the apply from the known callees.
+  for (SILFunction *Callee : Callees) {
+    FunctionInfo *FInfo = getFunctionInfo(Callee);
+    if (!FInfo->isValid())
+      recompute(FInfo);
+
+    CGNode *Node = FInfo->SummaryGraph.getNodeOrNull(
+                                         Callee->getArgument(ParamIdx), this);
+    if (!Node)
+      return true;
+
+    if (checkContentOfIndirectParam) {
+      Node = Node->getContentNodeOrNull();
+      if (!Node)
+        continue;
+    }
+
+    if (Node->escapes())
+      return true;
+  }
+  return false;
 }
 
 void EscapeAnalysis::invalidate(InvalidationKind K) {

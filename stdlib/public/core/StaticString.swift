@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -17,7 +17,7 @@
 // are involved in its construction.  This feature is crucial for
 // preventing infinite recursion even in non-asserting cases.
 
-/// An simple string designed to represent text that is "knowable at
+/// A simple string designed to represent text that is "knowable at
 /// compile-time".
 ///
 /// Logically speaking, each instance looks something like this:
@@ -36,7 +36,7 @@ public struct StaticString
     StringLiteralConvertible,
     CustomStringConvertible,
     CustomDebugStringConvertible,
-    _Reflectable {
+    CustomReflectable {
 
   /// Either a pointer to the start of UTF-8 data, or an integer representation
   /// of a single Unicode scalar.
@@ -226,7 +226,7 @@ public struct StaticString
     return self.stringValue.debugDescription
   }
 
-  public func _getMirror() -> _MirrorType {
-    return _reflect(self.stringValue)
+  public func customMirror() -> Mirror {
+    return Mirror(reflecting: stringValue)
   }
 }

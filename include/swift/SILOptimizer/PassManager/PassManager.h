@@ -1,8 +1,8 @@
-//===-- PassManager.h  - Swift Pass Manager ---------------------*- C++ -*-===//
+//===--- PassManager.h  - Swift Pass Manager --------------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -17,6 +17,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <vector>
 
 #ifndef SWIFT_SILOPTIMIZER_PASSMANAGER_PASSMANAGER_H
 #define SWIFT_SILOPTIMIZER_PASSMANAGER_PASSMANAGER_H
@@ -41,6 +42,9 @@ class SILPassManager {
   /// A list of registered analysis.
   llvm::SmallVector<SILAnalysis *, 16> Analysis;
 
+  /// The worklist of functions to be processed by function passes.
+  std::vector<SILFunction *> FunctionWorklist;
+
   // Name of the current optimization stage for diagnostics.
   std::string StageName;
 
@@ -59,8 +63,8 @@ class SILPassManager {
   llvm::DenseMap<SILFunction *, CompletedPasses> CompletedPassesMap;
 
   /// Set to true when a pass invalidates an analysis.
-  bool currentPassHasInvalidated = false;
-  
+  bool CurrentPassHasInvalidated = false;
+
 public:
   /// C'tor. It creates and registers all analysis passes, which are defined
   /// in Analysis.def.
@@ -88,6 +92,13 @@ public:
   /// \brief Run one iteration of the optimization pipeline.
   void runOneIteration();
 
+  /// \brief Add a function to the function pass worklist.
+  void addFunctionToWorklist(SILFunction *F) {
+    assert(F && F->isDefinition() && F->shouldOptimize() &&
+           "Expected optimizable function definition!");
+    FunctionWorklist.push_back(F);
+  }
+
   ///  \brief Broadcast the invalidation of the module to all analysis.
   void invalidateAnalysis(SILAnalysis::InvalidationKind K) {
     assert(K != SILAnalysis::InvalidationKind::Nothing &&
@@ -97,7 +108,7 @@ public:
       if (!AP->isLocked())
         AP->invalidate(K);
 
-    currentPassHasInvalidated = true;
+    CurrentPassHasInvalidated = true;
 
     // Assume that all functions have changed. Clear all masks of all functions.
     CompletedPassesMap.clear();
@@ -111,13 +122,13 @@ public:
       if (!AP->isLocked())
         AP->invalidate(F, K);
     
-    currentPassHasInvalidated = true;
+    CurrentPassHasInvalidated = true;
     // Any change let all passes run again.
     CompletedPassesMap[F].reset();
   }
 
   /// \brief Reset the state of the pass manager and remove all transformation
-  /// owned by the pass manager. Anaysis passes will be kept.
+  /// owned by the pass manager. Analysis passes will be kept.
   void resetAndRemoveTransformations();
 
   // Sets the name of the current optimization stage used for debugging.
@@ -160,6 +171,9 @@ private:
   /// Run the SIL module transform \p SMT over all the functions in
   /// the module.
   void runModulePass(SILModuleTransform *SMT);
+
+  /// Run the passes in \p FuncTransforms on the function \p F.
+  void runPassesOnFunction(PassList FuncTransforms, SILFunction *F);
 
   /// Run the passes in \p FuncTransforms. Return true
   /// if the pass manager requested to stop the execution

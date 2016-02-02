@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -16,8 +16,7 @@
 /// The compiler has special knowledge of the existence of
 /// `ImplicitlyUnwrappedOptional<Wrapped>`, but always interacts with it using
 /// the library intrinsics below.
-public enum ImplicitlyUnwrappedOptional<Wrapped>
-  : _Reflectable, NilLiteralConvertible {
+public enum ImplicitlyUnwrappedOptional<Wrapped> : NilLiteralConvertible {
   case None
   case Some(Wrapped)
 
@@ -69,16 +68,6 @@ public enum ImplicitlyUnwrappedOptional<Wrapped>
       return try f(y)
     case .None:
       return .None
-    }
-  }
-
-  /// Returns a mirror that reflects `self`.
-  public func _getMirror() -> _MirrorType {
-    // FIXME: This should probably use _OptionalMirror in both cases.
-    if let value = self {
-      return _reflect(value)
-    } else {
-      return _OptionalMirror<Wrapped>(.None)
     }
   }
 }

@@ -27,21 +27,15 @@ class C1 {
 
   @warn_unused_result(message="huzzah")
   static func f2() { }
-
-  @warn_unused_result
-  func curried1()()() { } // expected-warning {{curried function declaration syntax will be removed in a future version of Swift}}
 }
 
 func testMethodsNegative(c1: C1) {
   c1.f1 // expected-error{{expression resolves to an unused function}}
-  c1.curried1() // expected-error{{expression resolves to an unused function}}
-  c1.curried1()() // expected-error{{expression resolves to an unused function}}
 }
 
 func testMethodsPositive(c1: C1) {
   c1.f1() // expected-warning{{result of call to 'f1()' is unused}}
   C1.f2() // expected-warning{{result of call to 'f2()' is unused: huzzah}}
-  c1.curried1()()() // expected-warning{{result of call to 'curried1()' is unused}}
 }
 
 struct Inits1 {
@@ -86,7 +80,7 @@ struct BadAttributes1 {
   @warn_unused_result(blarg) func f1() { } // expected-warning{{unknown parameter 'blarg' in 'warn_unused_result' attribute}}
   @warn_unused_result(wibble="foo") func f2() { } // expected-warning{{unknown parameter 'wibble' in 'warn_unused_result' attribute}}
   @warn_unused_result(message) func f3() { } // expected-error{{expected '=' following 'message' parameter}}
-  @warn_unused_result(message=) func f4() { } // expected-error{{postfix '=' is reserved}}
+  @warn_unused_result(message=) func f4() { } // expected-error{{'=' must have consistent whitespace on both sides}}
   // expected-error@-1{{expected a string following '=' for 'message' parameter}}
   @warn_unused_result(message=blah) func f5() { } // expected-error{{expected a string following '=' for 'message' parameter}}
 

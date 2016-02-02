@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -46,9 +46,9 @@
 using namespace swift;
 using namespace constraints;
 
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // Type variable implementation.
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 #pragma mark Type variable implementation
 
 void TypeVariableType::Implementation::print(llvm::raw_ostream &OS) {
@@ -180,12 +180,15 @@ bool constraints::computeTupleShuffle(ArrayRef<TupleTypeElt> fromTuple,
         skipToNextAvailableInput();
       }
       sources[i] = TupleShuffleExpr::Variadic;
-      break;
+      
+      // Keep looking at subsequent arguments.  Non-variadic arguments may
+      // follow the variadic one.
+      continue;
     }
 
     // If there aren't any more inputs, we can use a default argument.
     if (fromNext == fromLast) {
-      if (elt2.hasInit()) {
+      if (elt2.hasDefaultArg()) {
         sources[i] = TupleShuffleExpr::DefaultInitialize;
         continue;
       }
@@ -239,9 +242,9 @@ bool constraints::hasTrailingClosure(const ConstraintLocatorBuilder &locator) {
   return false;
 }
 
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // High-level entry points.
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 static unsigned getNumArgs(ValueDecl *value) {
   if (!isa<FuncDecl>(value)) return ~0U;
@@ -281,13 +284,160 @@ static bool matchesDeclRefKind(ValueDecl *value, DeclRefKind refKind) {
   llvm_unreachable("bad declaration reference kind");
 }
 
+static bool containsDeclRefKind(LookupResult &lookupResult,
+                                DeclRefKind refKind) {
+  for (auto candidate : lookupResult) {
+    ValueDecl *D = candidate.Decl;
+    if (!D || !D->hasType())
+      continue;
+    if (matchesDeclRefKind(D, refKind))
+      return true;
+  }
+  return false;
+}
+
+/// Emit a diagnostic with a fixit hint for an invalid binary operator, showing
+/// how to split it according to splitCandidate.
+static void diagnoseBinOpSplit(UnresolvedDeclRefExpr *UDRE,
+                               std::pair<unsigned, bool> splitCandidate,
+                               Diag<Identifier, Identifier, bool> diagID,
+                               TypeChecker &TC) {
+
+  unsigned splitLoc = splitCandidate.first;
+  bool isBinOpFirst = splitCandidate.second;
+  StringRef nameStr = UDRE->getName().getBaseName().str();
+  auto startStr = nameStr.substr(0, splitLoc);
+  auto endStr = nameStr.drop_front(splitLoc);
+
+  // One valid split found, it is almost certainly the right answer.
+  auto diag = TC.diagnose(UDRE->getLoc(), diagID,
+                          TC.Context.getIdentifier(startStr),
+                          TC.Context.getIdentifier(endStr), isBinOpFirst);
+  // Highlight the whole operator.
+  diag.highlight(UDRE->getLoc());
+  // Insert whitespace on the left if the binop is at the start, or to the
+  // right if it is end.
+  if (isBinOpFirst)
+    diag.fixItInsert(UDRE->getLoc(), " ");
+  else
+    diag.fixItInsertAfter(UDRE->getLoc(), " ");
+
+  // Insert a space between the operators.
+  diag.fixItInsert(UDRE->getLoc().getAdvancedLoc(splitLoc), " ");
+}
+
+/// If we failed lookup of a binary operator, check to see it to see if
+/// it is a binary operator juxtaposed with a unary operator (x*-4) that
+/// needs whitespace.  If so, emit specific diagnostics for it and return true,
+/// otherwise return false.
+static bool diagnoseOperatorJuxtaposition(UnresolvedDeclRefExpr *UDRE,
+                                    DeclContext *DC,
+                                    TypeChecker &TC) {
+  Identifier name = UDRE->getName().getBaseName();
+  StringRef nameStr = name.str();
+  if (!name.isOperator() || nameStr.size() < 2)
+    return false;
+
+  bool isBinOp = UDRE->getRefKind() == DeclRefKind::BinaryOperator;
+
+  // If this is a binary operator, relex the token, to decide whether it has
+  // whitespace around it or not.  If it does "x +++ y", then it isn't likely to
+  // be a case where a space was forgotten.
+  if (isBinOp) {
+    auto tok = Lexer::getTokenAtLocation(TC.Context.SourceMgr, UDRE->getLoc());
+    if (tok.getKind() != tok::oper_binary_unspaced)
+      return false;
+  }
+
+  // Okay, we have a failed lookup of a multicharacter operator. Check to see if
+  // lookup succeeds if part is split off, and record the matches found.
+  //
+  // In the case of a binary operator, the bool indicated is false if the
+  // first half of the split is the unary operator (x!*4) or true if it is the
+  // binary operator (x*+4).
+  std::vector<std::pair<unsigned, bool>> WorkableSplits;
+
+  // Check all the potential splits.
+  for (unsigned splitLoc = 1, e = nameStr.size(); splitLoc != e; ++splitLoc) {
+    // For it to be a valid split, the start and end section must be valid
+    // operators, splitting a unicode code point isn't kosher.
+    auto startStr = nameStr.substr(0, splitLoc);
+    auto endStr = nameStr.drop_front(splitLoc);
+    if (!Lexer::isOperator(startStr) || !Lexer::isOperator(endStr))
+      continue;
+
+    auto startName = TC.Context.getIdentifier(startStr);
+    auto endName = TC.Context.getIdentifier(endStr);
+
+    // Perform name lookup for the first and second pieces.  If either fail to
+    // be found, then it isn't a valid split.
+    NameLookupOptions LookupOptions = defaultUnqualifiedLookupOptions;
+    // This is only used for diagnostics, so always use KnownPrivate.
+    LookupOptions |= NameLookupFlags::KnownPrivate;
+    auto startLookup = TC.lookupUnqualified(DC, startName, UDRE->getLoc(),
+                                       LookupOptions);
+    if (!startLookup) continue;
+    auto endLookup = TC.lookupUnqualified(DC, endName, UDRE->getLoc(),
+                                          LookupOptions);
+    if (!endLookup) continue;
+
+    // If the overall operator is a binary one, then we're looking at
+    // juxtaposed binary and unary operators.
+    if (isBinOp) {
+      // Look to see if the candidates found could possibly match.
+      if (containsDeclRefKind(startLookup, DeclRefKind::PostfixOperator) &&
+          containsDeclRefKind(endLookup, DeclRefKind::BinaryOperator))
+        WorkableSplits.push_back({ splitLoc, false });
+
+      if (containsDeclRefKind(startLookup, DeclRefKind::BinaryOperator) &&
+          containsDeclRefKind(endLookup, DeclRefKind::PrefixOperator))
+        WorkableSplits.push_back({ splitLoc, true });
+    } else {
+      // Otherwise, it is two of the same kind, e.g. "!!x" or "!~x".
+      if (containsDeclRefKind(startLookup, UDRE->getRefKind()) &&
+          containsDeclRefKind(endLookup, UDRE->getRefKind()))
+        WorkableSplits.push_back({ splitLoc, false });
+    }
+  }
+
+  switch (WorkableSplits.size()) {
+  case 0:
+    // No splits found, can't produce this diagnostic.
+    return false;
+  case 1:
+    // One candidate: produce an error with a fixit on it.
+    if (isBinOp)
+      diagnoseBinOpSplit(UDRE, WorkableSplits[0],
+                         diag::unspaced_binary_operator_fixit, TC);
+    else
+      TC.diagnose(UDRE->getLoc().getAdvancedLoc(WorkableSplits[0].first),
+                  diag::unspaced_unary_operator);
+    return true;
+
+  default:
+    // Otherwise, we have to produce a series of notes listing the various
+    // options.
+    TC.diagnose(UDRE->getLoc(), isBinOp ? diag::unspaced_binary_operator :
+                diag::unspaced_unary_operator)
+      .highlight(UDRE->getLoc());
+
+    if (isBinOp) {
+      for (auto candidateSplit : WorkableSplits)
+        diagnoseBinOpSplit(UDRE, candidateSplit,
+                           diag::unspaced_binary_operators_candidate, TC);
+    }
+    return true;
+  }
+}
+
+
 /// Bind an UnresolvedDeclRefExpr by performing name lookup and
 /// returning the resultant expression.  Context is the DeclContext used
 /// for the lookup.
 Expr *TypeChecker::
 resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE, DeclContext *DC) {
   // Process UnresolvedDeclRefExpr by doing an unqualified lookup.
-  Identifier Name = UDRE->getName();
+  DeclName Name = UDRE->getName();
   SourceLoc Loc = UDRE->getLoc();
 
   // Perform standard value name lookup.
@@ -297,9 +447,15 @@ resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE, DeclContext *DC) {
   auto Lookup = lookupUnqualified(DC, Name, Loc, LookupOptions);
 
   if (!Lookup) {
-    diagnose(Loc, diag::use_unresolved_identifier, Name)
-      .highlight(Loc);
-    return new (Context) ErrorExpr(Loc);
+    // If we failed lookup of an operator, check to see it to see if it is
+    // because two operators are juxtaposed e.g. (x*-4) that needs whitespace.
+    // If so, emit specific diagnostics for it.
+    if (!diagnoseOperatorJuxtaposition(UDRE, DC, *this)) {
+      diagnose(Loc, diag::use_unresolved_identifier, Name,
+               UDRE->getName().isOperator())
+        .highlight(UDRE->getSourceRange());
+    }
+    return new (Context) ErrorExpr(UDRE->getSourceRange());
   }
 
   // FIXME: Need to refactor the way we build an AST node from a lookup result!
@@ -321,7 +477,7 @@ resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE, DeclContext *DC) {
         diagnose(Loc, diag::use_local_before_declaration, Name);
         diagnose(D->getLoc(), diag::decl_declared_here, Name);
       }
-      return new (Context) ErrorExpr(Loc);
+      return new (Context) ErrorExpr(UDRE->getSourceRange());
     }
     if (matchesDeclRefKind(D, UDRE->getRefKind()))
       ResultValues.push_back(D);
@@ -335,22 +491,24 @@ resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE, DeclContext *DC) {
       isa<TypeDecl>(ResultValues[0])) {
     // FIXME: This is odd.
     if (isa<ModuleDecl>(ResultValues[0])) {
-      return new (Context) DeclRefExpr(ResultValues[0], Loc, /*implicit=*/false,
+      return new (Context) DeclRefExpr(ResultValues[0], UDRE->getNameLoc(),
+                                       /*implicit=*/false,
                                        AccessSemantics::Ordinary,
                                        ResultValues[0]->getType());
     }
 
-    return TypeExpr::createForDecl(Loc, cast<TypeDecl>(ResultValues[0]));
+    return TypeExpr::createForDecl(Loc, cast<TypeDecl>(ResultValues[0]),
+                                   UDRE->isImplicit());
   }
   
   if (AllDeclRefs) {
     // Diagnose uses of operators that found no matching candidates.
     if (ResultValues.empty()) {
       assert(UDRE->getRefKind() != DeclRefKind::Ordinary);
-      diagnose(Loc, diag::use_nonmatching_operator, Name,
+      diagnose(Loc, diag::use_nonmatching_operator, Name.getBaseName(),
                UDRE->getRefKind() == DeclRefKind::BinaryOperator ? 0 :
                UDRE->getRefKind() == DeclRefKind::PrefixOperator ? 1 : 2);
-      return new (Context) ErrorExpr(Loc);
+      return new (Context) ErrorExpr(UDRE->getSourceRange());
     }
 
     // For operators, sort the results so that non-generic operations come
@@ -375,8 +533,8 @@ resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE, DeclContext *DC) {
       });
     }
 
-    return buildRefExpr(ResultValues, DC, Loc, UDRE->isImplicit(),
-                        UDRE->isSpecialized());
+    return buildRefExpr(ResultValues, DC, UDRE->getNameLoc(),
+                        UDRE->isImplicit(), UDRE->isSpecialized());
   }
 
   ResultValues.clear();
@@ -402,15 +560,17 @@ resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE, DeclContext *DC) {
   if (AllMemberRefs) {
     Expr *BaseExpr;
     if (auto NTD = dyn_cast<NominalTypeDecl>(Base)) {
-      BaseExpr = TypeExpr::createForDecl(Loc, NTD);
+      BaseExpr = TypeExpr::createForDecl(Loc, NTD, /*implicit=*/true);
     } else {
-      BaseExpr = new (Context) DeclRefExpr(Base, Loc, /*implicit=*/true);
+      BaseExpr = new (Context) DeclRefExpr(Base, UDRE->getNameLoc(),
+                                           /*implicit=*/true);
     }
     
    
     // Otherwise, form an UnresolvedDotExpr and sema will resolve it based on
     // type information.
-    return new (Context) UnresolvedDotExpr(BaseExpr, SourceLoc(), Name, Loc,
+    return new (Context) UnresolvedDotExpr(BaseExpr, SourceLoc(), Name,
+                                           UDRE->getNameLoc(),
                                            UDRE->isImplicit());
   }
   
@@ -418,7 +578,7 @@ resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE, DeclContext *DC) {
   // very broken, but it's still conceivable that this may happen due to
   // invalid shadowed declarations.
   // llvm_unreachable("Can't represent lookup result");
-  return new (Context) ErrorExpr(Loc);
+  return new (Context) ErrorExpr(UDRE->getSourceRange());
 }
 
 /// If an expression references 'self.init' or 'super.init' in an
@@ -426,10 +586,14 @@ resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE, DeclContext *DC) {
 /// Otherwise, return nil.
 VarDecl *
 TypeChecker::getSelfForInitDelegationInConstructor(DeclContext *DC,
-                                           UnresolvedConstructorExpr *ctorRef) {
+                                                   UnresolvedDotExpr *ctorRef) {
+  // If the reference isn't to a constructor, we're done.
+  if (ctorRef->getName().getBaseName() != Context.Id_init)
+    return nullptr;
+
   if (auto ctorContext
         = dyn_cast_or_null<ConstructorDecl>(DC->getInnermostMethodContext())) {
-    auto nestedArg = ctorRef->getSubExpr();
+    auto nestedArg = ctorRef->getBase();
     if (auto inout = dyn_cast<InOutExpr>(nestedArg))
       nestedArg = inout->getSubExpr();
     if (nestedArg->isSuperExpr())
@@ -562,9 +726,9 @@ namespace {
       // determine where to place the RebindSelfInConstructorExpr node.
       // When updating this logic, also update
       // RebindSelfInConstructorExpr::getCalledConstructor.
-      if (auto nestedCtor = dyn_cast<UnresolvedConstructorExpr>(expr)) {
+      if (auto unresolvedDot = dyn_cast<UnresolvedDotExpr>(expr)) {
         if (auto self
-              = TC.getSelfForInitDelegationInConstructor(DC, nestedCtor)) {
+              = TC.getSelfForInitDelegationInConstructor(DC, unresolvedDot)) {
           // Walk our ancestor expressions looking for the appropriate place
           // to insert the RebindSelfInConstructorExpr.
           Expr *target = nullptr;
@@ -577,7 +741,7 @@ namespace {
               foundRebind = true;
               break;
             }
-            
+
             // Recognize applications.
             if (auto apply = dyn_cast<ApplyExpr>(ancestor)) {
               // If we already saw an application, we're done.
@@ -586,7 +750,7 @@ namespace {
 
               // If the function being called is not our unresolved initializer
               // reference, we're done.
-              if (apply->getFn()->getSemanticsProvidingExpr() != nestedCtor)
+              if (apply->getFn()->getSemanticsProvidingExpr() != unresolvedDot)
                 break;
 
               foundApply = true;
@@ -653,10 +817,9 @@ bool PreCheckExpression::walkToClosureExprPre(ClosureExpr *closure) {
   TypeResolutionOptions options;
   options |= TR_AllowUnspecifiedTypes;
   options |= TR_AllowUnboundGenerics;
-  options |= TR_ImmediateFunctionInput;
   options |= TR_InExpression;
   bool hadParameterError = false;
-  if (TC.typeCheckPattern(closure->getParams(), DC, options)) {
+  if (TC.typeCheckParameterList(closure->getParameters(), DC, options)) {
     closure->setType(ErrorType::get(TC.Context));
 
     // If we encounter an error validating the parameter list, don't bail.
@@ -693,52 +856,31 @@ bool PreCheckExpression::walkToClosureExprPre(ClosureExpr *closure) {
 /// as expressions due to the parser not knowing which identifiers are
 /// type names.
 TypeExpr *PreCheckExpression::simplifyTypeExpr(Expr *E) {
-  // Fold T[] into an array, it isn't a subscript on a metatype.
-  if (auto *SE = dyn_cast<SubscriptExpr>(E)) {
-    auto *TyExpr = dyn_cast<TypeExpr>(SE->getBase());
-    if (!TyExpr) return nullptr;
-    
-    // We don't fold subscripts with indexes, just an empty subscript.
-    TupleExpr *Indexes = dyn_cast<TupleExpr>(SE->getIndex());
-    if (!Indexes || Indexes->getNumElements() != 0)
-      return nullptr;
 
-    auto *InnerTypeRepr = TyExpr->getTypeRepr();
-    assert(!TyExpr->isImplicit() && InnerTypeRepr &&
-           "SubscriptExpr doesn't work on implicit TypeExpr's, "
-           "the TypeExpr should have been built correctly in the first place");
-
-    auto *NewTypeRepr =
-      new (TC.Context) ArrayTypeRepr(InnerTypeRepr, nullptr,
-                                     Indexes->getSourceRange(),
-                                     /*OldSyntax=*/true);
-
-    TC.diagnose(Indexes->getStartLoc(), diag::new_array_syntax)
-      .fixItInsert(SE->getStartLoc(), "[")
-      .fixItRemove(Indexes->getStartLoc());
-
-    return new (TC.Context) TypeExpr(TypeLoc(NewTypeRepr, Type()));
-  }
-  
   // Fold 'T.Type' or 'T.Protocol' into a metatype when T is a TypeExpr.
   if (auto *MRE = dyn_cast<UnresolvedDotExpr>(E)) {
     auto *TyExpr = dyn_cast<TypeExpr>(MRE->getBase());
     if (!TyExpr) return nullptr;
     
     auto *InnerTypeRepr = TyExpr->getTypeRepr();
-    assert(!TyExpr->isImplicit() && InnerTypeRepr &&
-           "This doesn't work on implicit TypeExpr's, "
-           "the TypeExpr should have been built correctly in the first place");
 
     if (MRE->getName() == TC.Context.Id_Protocol) {
+      assert(!TyExpr->isImplicit() && InnerTypeRepr &&
+             "This doesn't work on implicit TypeExpr's, "
+             "TypeExpr should have been built correctly in the first place");
       auto *NewTypeRepr =
-        new (TC.Context) ProtocolTypeRepr(InnerTypeRepr, MRE->getNameLoc());
+        new (TC.Context) ProtocolTypeRepr(InnerTypeRepr,
+                                          MRE->getNameLoc().getBaseNameLoc());
       return new (TC.Context) TypeExpr(TypeLoc(NewTypeRepr, Type()));
     }
     
     if (MRE->getName() == TC.Context.Id_Type) {
+      assert(!TyExpr->isImplicit() && InnerTypeRepr &&
+             "This doesn't work on implicit TypeExpr's, "
+             "TypeExpr should have been built correctly in the first place");
       auto *NewTypeRepr =
-        new (TC.Context) MetatypeTypeRepr(InnerTypeRepr, MRE->getNameLoc());
+        new (TC.Context) MetatypeTypeRepr(InnerTypeRepr,
+                                          MRE->getNameLoc().getBaseNameLoc());
       return new (TC.Context) TypeExpr(TypeLoc(NewTypeRepr, Type()));
     }
   }
@@ -845,10 +987,9 @@ TypeExpr *PreCheckExpression::simplifyTypeExpr(Expr *E) {
       return nullptr;
 
     auto *NewTypeRepr =
-      new (TC.Context) ArrayTypeRepr(TyExpr->getTypeRepr(), nullptr,
+      new (TC.Context) ArrayTypeRepr(TyExpr->getTypeRepr(), 
                                      SourceRange(AE->getLBracketLoc(),
-                                                 AE->getRBracketLoc()),
-                                     /*OldSyntax=*/false);
+                                                 AE->getRBracketLoc()));
     return new (TC.Context) TypeExpr(TypeLoc(NewTypeRepr, Type()));
 
   }
@@ -1235,10 +1376,23 @@ getTypeOfExpressionWithoutApplying(Expr *&expr, DeclContext *dc,
 
   // Attempt to solve the constraint system.
   SmallVector<Solution, 4> viable;
+  const Type originalType = expr->getType();
+  const bool needClearType = originalType && originalType->is<ErrorType>();
+  const auto recoverOriginalType = [&] () {
+    if (needClearType)
+      expr->setType(originalType);
+  };
+
+  // If the previous checking gives the expr error type, clear the result and
+  // re-check.
+  if (needClearType)
+    expr->setType(Type());
   if (solveForExpression(expr, dc, /*convertType*/Type(),
                          allowFreeTypeVariables, listener, cs, viable,
-                         TypeCheckExprFlags::SuppressDiagnostics))
+                         TypeCheckExprFlags::SuppressDiagnostics)) {
+    recoverOriginalType();
     return None;
+  }
 
   // Get the expression's simplified type.
   auto &solution = viable[0];
@@ -1248,6 +1402,8 @@ getTypeOfExpressionWithoutApplying(Expr *&expr, DeclContext *dc,
   assert(!exprType->hasTypeVariable() &&
          "free type variable with FreeTypeVariableBinding::GenericParameters?");
 
+  // Recover the original type if needed.
+  recoverOriginalType();
   return exprType;
 }
 
@@ -1436,10 +1592,9 @@ bool TypeChecker::typeCheckBinding(Pattern *&pattern, Expr *&initializer,
       InitType = solution.simplifyType(tc, InitType);
 
       // Convert the initializer to the type of the pattern.
+      // ignoreTopLevelInjection = Binding->isConditional()
       expr = solution.coerceToType(expr, InitType, Locator,
-                                   false
-                                   /*ignoreTopLevelInjection=
-                                     Binding->isConditional()*/);
+                                   false /* ignoreTopLevelInjection */);
       if (!expr) {
         return nullptr;
       }
@@ -1853,10 +2008,7 @@ bool TypeChecker::typeCheckStmtCondition(StmtCondition &cond, DeclContext *dc,
     // If the pattern didn't get a type, it's because we ran into some
     // unknown types along the way. We'll need to check the initializer.
     auto init = elt.getInitializer();
-    if (typeCheckBinding(pattern, init, dc)) {
-      hadError = true;
-      continue;
-    }
+    hadError |= typeCheckBinding(pattern, init, dc);
     elt.setPattern(pattern);
     elt.setInitializer(init);
     hadAnyFalsable |= pattern->isRefutablePattern();
@@ -1907,9 +2059,11 @@ bool TypeChecker::typeCheckExprPattern(ExprPattern *EP, DeclContext *DC,
   }
   
   // Build the 'expr ~= var' expression.
-  auto *matchOp = buildRefExpr(choices, DC, EP->getLoc(), /*Implicit=*/true);
+  // FIXME: Compound name locations.
+  auto *matchOp = buildRefExpr(choices, DC, DeclNameLoc(EP->getLoc()),
+                               /*Implicit=*/true);
   auto *matchVarRef = new (Context) DeclRefExpr(matchVar,
-                                                EP->getLoc(),
+                                                DeclNameLoc(EP->getLoc()),
                                                 /*Implicit=*/true);
   
   Expr *matchArgElts[] = {EP->getSubExpr(), matchVarRef};
@@ -2123,9 +2277,9 @@ bool TypeChecker::convertToType(Expr *&expr, Type type, DeclContext *dc) {
   return false;
 }
 
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // Debugging
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 #pragma mark Debugging
 
 void Solution::dump() const {
@@ -2317,7 +2471,7 @@ void ConstraintSystem::print(raw_ostream &out) {
       case OverloadChoiceKind::DeclViaUnwrappedOptional:
         if (choice.getBaseType())
           out << choice.getBaseType()->getString() << ".";
-        out << choice.getDecl()->getName().str() << ": "
+        out << choice.getDecl()->getName() << ": "
           << resolved->BoundType->getString() << " == "
           << resolved->ImpliedType->getString() << "\n";
         break;
@@ -2589,7 +2743,7 @@ CheckedCastKind TypeChecker::typeCheckCheckedCast(Type fromType,
   return CheckedCastKind::ValueCast;
 }
 
-/// If the expression is a an implicit call to _forceBridgeFromObjectiveC or
+/// If the expression is an implicit call to _forceBridgeFromObjectiveC or
 /// _conditionallyBridgeFromObjectiveC, returns the argument of that call.
 static Expr *lookThroughBridgeFromObjCCall(ASTContext &ctx, Expr *expr) {
   auto call = dyn_cast<CallExpr>(expr);
